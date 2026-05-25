@@ -1,0 +1,10 @@
+[package]
+name = "san"
+version = "0.1.0"
+edition = "2024"
+description = "A powerful Static ANalyzer."
+license = "MIT"
+repository = "https://github.com/ericsssan/san"
+readme = "README.md"
+
+[dependencies]
