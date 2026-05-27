@@ -1,0 +1,9 @@
+[package]
+name = "nix_mman"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+nix = { version = "0.27", features = ["mman"] }

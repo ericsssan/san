@@ -1,0 +1,6 @@
+[package]
+name = "atomic_from_ptr"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

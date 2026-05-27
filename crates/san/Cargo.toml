@@ -1,0 +1,9 @@
+[package]
+name = "san"
+description = "A powerful Static ANalyzer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"

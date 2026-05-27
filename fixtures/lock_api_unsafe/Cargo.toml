@@ -1,0 +1,9 @@
+[package]
+name = "lock_api_unsafe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+parking_lot = "0.12"

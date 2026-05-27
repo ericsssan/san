@@ -1,0 +1,9 @@
+[package]
+name = "not_nan_unchecked"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+ordered-float = "4"

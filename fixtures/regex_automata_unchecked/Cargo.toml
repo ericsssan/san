@@ -1,0 +1,9 @@
+[package]
+name = "regex_automata_unchecked"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+regex-automata = { version = "0.4", features = ["dfa-build", "dfa-search"] }

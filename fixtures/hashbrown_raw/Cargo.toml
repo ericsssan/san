@@ -1,0 +1,9 @@
+[package]
+name = "hashbrown_raw"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+hashbrown = { version = "0.14", features = ["raw"] }

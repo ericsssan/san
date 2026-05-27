@@ -1,0 +1,8 @@
+[package]
+name = "signal_hook_unsafe"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+signal-hook-registry = "1"
+libc = "0.2"

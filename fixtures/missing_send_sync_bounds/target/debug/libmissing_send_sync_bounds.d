@@ -1,0 +1,1 @@
+/Users/ericsan/Development/OpenSource/san/fixtures/missing_send_sync_bounds/target/debug/libmissing_send_sync_bounds.rlib: /Users/ericsan/Development/OpenSource/san/fixtures/missing_send_sync_bounds/src/lib.rs

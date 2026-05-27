@@ -1,0 +1,6 @@
+[package]
+name = "str_from_utf8_unchecked"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

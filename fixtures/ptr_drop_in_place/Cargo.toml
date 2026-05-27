@@ -1,0 +1,6 @@
+[package]
+name = "ptr_drop_in_place"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

@@ -1,0 +1,11 @@
+[package]
+name = "cargo-san"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "cargo-san"
+path = "src/main.rs"

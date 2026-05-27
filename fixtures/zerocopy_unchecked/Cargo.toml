@@ -1,0 +1,9 @@
+[package]
+name = "zerocopy_unchecked"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+zerocopy = "0.8"

@@ -1,0 +1,9 @@
+[package]
+name = "spin_unsafe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+spin = "0.9"

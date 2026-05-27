@@ -1,0 +1,9 @@
+[package]
+name = "typed_arena_unchecked"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+typed-arena = "2"
+
+[workspace]

@@ -1,0 +1,9 @@
+[package]
+name = "crossbeam_epoch"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+crossbeam-epoch = "0.9"

@@ -1,0 +1,7 @@
+[package]
+name = "bytemuck_unsafe_impl"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+bytemuck = "1"

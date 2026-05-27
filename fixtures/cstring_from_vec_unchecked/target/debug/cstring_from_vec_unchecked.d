@@ -1,0 +1,1 @@
+/Users/ericsan/Development/OpenSource/san/fixtures/cstring_from_vec_unchecked/target/debug/cstring_from_vec_unchecked: /Users/ericsan/Development/OpenSource/san/fixtures/cstring_from_vec_unchecked/src/main.rs
