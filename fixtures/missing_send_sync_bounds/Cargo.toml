@@ -1,0 +1,6 @@
+[package]
+name = "missing_send_sync_bounds"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

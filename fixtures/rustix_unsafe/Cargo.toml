@@ -1,0 +1,9 @@
+[package]
+name = "rustix_unsafe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustix = { version = "1", features = ["runtime", "mm", "stdio", "pipe"] }
+
+[workspace]

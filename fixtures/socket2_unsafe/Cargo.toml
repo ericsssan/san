@@ -1,0 +1,8 @@
+[package]
+name = "socket2_unsafe"
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+socket2 = "0.5"
+libc = "0.2"
