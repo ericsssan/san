@@ -1,2 +1,33 @@
 /target
 .envrc
+
+# compiled exploration binaries and scratch files in repo root
+/probe_*
+/arc_more
+/atomic_more
+/atomic_safe
+/check_more_unsafe
+/check_once2
+/check_vecdeque
+/float_algebraic_safe
+/generator_safe3
+/hashmap_disjoint
+/intrinsics_test
+/lazy_lock_force_mut
+/librust_out.rlib
+/main
+/new_slice_ops2
+/once_lock
+/once_test
+/rust_out
+/slice_from_raw2
+/slice_swap_test2
+/str_get_unchecked
+/test_chunks
+/test_chunks2
+/test_env
+/test_vec_from_parts
+/unix_io
+
+# session notes
+/*.txt
