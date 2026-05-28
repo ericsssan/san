@@ -186,4 +186,22 @@ impl BlockState {
     pub fn has_hazard_protocol(&self) -> bool {
         self.typestate.values().any(|s| s.is_hazard())
     }
+
+    /// Returns `true` if every tracked object reachable from `local` is in the
+    /// `RawOwned` state — i.e. the pointer came from a live `into_raw` call and
+    /// the backing allocation has not been reconstituted or freed yet.
+    /// Returns `false` if no objects are tracked (pointer is untracked / escaped).
+    pub fn ptr_is_raw_owned(&self, local: Local) -> bool {
+        let objs: Vec<_> = self.objects_for(local).collect();
+        !objs.is_empty()
+            && objs
+                .iter()
+                .all(|id| matches!(self.heap.get(id), Some(HeapState::RawOwned)))
+    }
+
+    /// Returns `true` if `local` was proven to be strictly less than some tracked
+    /// length by an `Assert` terminator over a `Lt`/`Ge` comparison.
+    pub fn local_is_bounded(&self, local: Local) -> bool {
+        self.bounded.contains(&local)
+    }
 }

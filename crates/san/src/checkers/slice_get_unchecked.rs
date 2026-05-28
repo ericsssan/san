@@ -42,42 +42,32 @@ impl Checker for SliceGetUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
+            // Suppress non-Pin get_unchecked* when the index is proven bounded on all paths.
+            if (path.ends_with("get_unchecked_mut") || path.ends_with("get_unchecked"))
+                && !path.contains("pin::Pin")
+            {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(idx_local) = args.get(1).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) => Some(p.local),
+                        _ => None,
+                    }) {
+                        if state.local_is_bounded(idx_local) {
+                            continue;
+                        }
+                    }
+                }
+            }
+
             let message = if path.ends_with("get_unchecked_mut") && path.contains("pin::Pin") {
                 "`Pin::get_unchecked_mut` — must not move out of or invalidate the \
                  returned &mut T; moving the value violates pinning (self-referential \
                  structs will corrupt their internal pointers)"
                     .to_string()
             } else if path.ends_with("get_unchecked_mut") {
-                // Suppress when the index arg is proven bounded by an assert
-                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                    if let Some(idx_local) = args.get(1).and_then(|a| {
-                        match &a.node {
-                            Operand::Move(p) | Operand::Copy(p) => Some(p.local),
-                            _ => None,
-                        }
-                    }) {
-                        if state.bounded.contains(&idx_local) {
-                            continue;
-                        }
-                    }
-                }
                 "`get_unchecked_mut` — index must be strictly in-bounds (< len); \
                  out-of-bounds access is UB (no panic, silent memory corruption)"
                     .to_string()
             } else if path.ends_with("get_unchecked") {
-                // Suppress when the index arg is proven bounded by an assert
-                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                    if let Some(idx_local) = args.get(1).and_then(|a| {
-                        match &a.node {
-                            Operand::Move(p) | Operand::Copy(p) => Some(p.local),
-                            _ => None,
-                        }
-                    }) {
-                        if state.bounded.contains(&idx_local) {
-                            continue;
-                        }
-                    }
-                }
                 "`get_unchecked` — index must be strictly in-bounds (< len); \
                  out-of-bounds access is UB (no panic, silent memory corruption)"
                     .to_string()

@@ -22,7 +22,6 @@
 ///
 /// Seen in: custom arena allocators, intrusive data structures, and any crate
 /// that passes NonNull pointers across function boundaries.
-use crate::analysis::object::HeapState;
 use crate::analysis::transfer::first_arg_base_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
@@ -78,16 +77,11 @@ impl Checker for NonNullDeref {
                 continue;
             };
 
-            // Suppress if flow tracks this pointer as coming from a live into_raw (still valid)
+            // Suppress if flow proves this pointer came from a live into_raw (still valid).
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_base_local(args) {
-                    let mut objs = state.objects_for(ptr_local).peekable();
-                    if objs.peek().is_some() {
-                        let all_raw_owned = state.objects_for(ptr_local)
-                            .all(|id| matches!(state.heap.get(&id), Some(HeapState::RawOwned)));
-                        if all_raw_owned {
-                            continue;
-                        }
+                    if state.ptr_is_raw_owned(ptr_local) {
+                        continue;
                     }
                 }
             }
