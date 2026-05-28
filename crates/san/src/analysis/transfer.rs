@@ -33,14 +33,14 @@ pub fn apply_statement<'tcx>(
             // Move: transfer tracking from src to dst, clearing src.
             let src_local = src.local;
             let objs = state.points_to.remove(&src_local).unwrap_or_default();
-            let proto = state.local_proto.remove(&src_local);
+            let protos = state.local_proto.remove(&src_local).unwrap_or_default();
             if !objs.is_empty() {
                 state.points_to.insert(dst_local, objs);
             } else {
                 state.points_to.remove(&dst_local);
             }
-            if let Some(p) = proto {
-                state.local_proto.insert(dst_local, p);
+            if !protos.is_empty() {
+                state.local_proto.insert(dst_local, protos);
             } else {
                 state.local_proto.remove(&dst_local);
             }
@@ -53,8 +53,8 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.points_to.remove(&dst_local);
             }
-            if let Some(proto) = state.local_proto.get(&src_local).copied() {
-                state.local_proto.insert(dst_local, proto);
+            if let Some(protos) = state.local_proto.get(&src_local).cloned() {
+                state.local_proto.insert(dst_local, protos);
             } else {
                 state.local_proto.remove(&dst_local);
             }
@@ -63,6 +63,14 @@ pub fn apply_statement<'tcx>(
             // Unknown rvalue: clear tracking on dst.
             state.points_to.remove(&dst_local);
             state.local_proto.remove(&dst_local);
+            // For a projected move, also clear the base local to prevent stale tracking.
+            // E.g. `_dst = move _src.field` leaves `_src` tracked but field is gone.
+            if let Rvalue::Use(Operand::Move(src), _) = rvalue {
+                if !src.projection.is_empty() {
+                    state.points_to.remove(&src.local);
+                    state.local_proto.remove(&src.local);
+                }
+            }
         }
     }
 }
@@ -90,7 +98,7 @@ pub fn apply_terminator<'tcx>(
             let dest = destination.local;
 
             if is_into_raw(&path) {
-                // Allocation site abstraction: all allocations at this call site share ObjectId.
+                // Allocation-site abstraction: all allocations at this call site share ObjectId.
                 let obj_id = ObjectId(bb.index() as u32);
                 state.points_to.insert(dest, std::iter::once(obj_id).collect());
                 // Strong update: mark as freshly owned regardless of prior state.
@@ -104,34 +112,41 @@ pub fn apply_terminator<'tcx>(
                         if matches!(state.heap.get(&id), Some(HeapState::RawOwned)) {
                             state.heap.insert(id, HeapState::Reconstituted);
                         }
-                        // If already Reconstituted/MaybeFreed the checker fires — don't change
-                        // state here so it stays visible.
                     }
                 }
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
             } else if is_mem_forget(&path) {
-                if let Some(src) = first_arg_local(args) {
-                    // Escape owned objects — forgotten memory is intentionally untracked.
+                // Use base-local extraction so `mem::forget(container.field)` is handled.
+                if let Some(src) = first_arg_base_local(args) {
                     let objs: Vec<_> = state.objects_for(src).collect();
                     for id in objs {
                         state.heap.insert(id, HeapState::Escaped);
                     }
                     state.points_to.remove(&src);
-                    // Protocol: Forgotten means the caller took responsibility.
-                    if let Some(proto_id) = state.local_proto.remove(&src) {
-                        state.typestate.insert(proto_id, ProtocolState::Forgotten);
+                    let proto_ids = state.local_proto.remove(&src).unwrap_or_default();
+                    for proto_id in &proto_ids {
+                        state.typestate.insert(*proto_id, ProtocolState::Forgotten);
+                    }
+                    // If no ProtocolId was tracked (e.g., guard received as a parameter),
+                    // check whether the local's type looks like a guard. If so, flag that
+                    // an untracked forget occurred so the lock-state checker isn't confused.
+                    if proto_ids.is_empty() {
+                        let ty = body.local_decls[src].ty;
+                        if is_guard_type(tcx, ty) {
+                            state.untracked_forget_seen = true;
+                        }
                     }
                 }
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
             } else if is_epoch_pin(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
-                state.local_proto.insert(dest, proto_id);
+                state.local_proto.entry(dest).or_default().insert(proto_id);
                 state.typestate.insert(proto_id, ProtocolState::Active);
             } else if is_lock_acquire(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
-                state.local_proto.insert(dest, proto_id);
+                state.local_proto.entry(dest).or_default().insert(proto_id);
                 state.typestate.insert(proto_id, ProtocolState::Active);
             } else {
                 // Unrecognized call: escape any tracked raw-pointer args, clear dest.
@@ -144,8 +159,9 @@ pub fn apply_terminator<'tcx>(
         TerminatorKind::Drop { place, .. } => {
             if place.projection.is_empty() {
                 let local = place.local;
-                // RAII drop: protocol instance is consumed.
-                if let Some(proto_id) = state.local_proto.remove(&local) {
+                // RAII drop: consume all protocol instances tracked for this local.
+                let proto_ids = state.local_proto.remove(&local).unwrap_or_default();
+                for proto_id in proto_ids {
                     state.typestate.insert(proto_id, ProtocolState::Consumed);
                 }
                 // Don't remove from heap: RawOwned objects dropped here are leaks,
@@ -174,14 +190,46 @@ pub fn operand_local<'tcx>(op: &Operand<'tcx>) -> Option<Local> {
     }
 }
 
-/// Extract the Local from the first argument of a call, if it is a plain local.
+/// Extract the Local from the first call argument, requiring no projections.
+/// Use for `from_raw` — the raw pointer must be a plain local.
 pub fn first_arg_local<'tcx>(
     args: &[rustc_span::Spanned<Operand<'tcx>>],
 ) -> Option<Local> {
     args.first().and_then(|a| operand_local(&a.node))
 }
 
-/// Escape any tracked locals that are passed as raw pointers to an opaque call.
+/// Extract the **base** Local from the first call argument, accepting projections.
+/// Use for `mem::forget` where `mem::forget(container.field)` is valid.
+pub fn first_arg_base_local<'tcx>(
+    args: &[rustc_span::Spanned<Operand<'tcx>>],
+) -> Option<Local> {
+    args.first().and_then(|a| match &a.node {
+        Operand::Move(p) | Operand::Copy(p) => Some(p.local),
+        _ => None,
+    })
+}
+
+/// Returns `true` if `ty` looks like a lock guard (type name contains "Guard").
+/// Used to detect when a guard received as a function parameter is forgotten.
+fn is_guard_type<'tcx>(tcx: TyCtxt<'tcx>, ty: rustc_middle::ty::Ty<'tcx>) -> bool {
+    let check_adt = |def_id| {
+        let name = tcx.item_name(def_id);
+        name.as_str().contains("Guard")
+    };
+    match ty.kind() {
+        TyKind::Adt(adt_def, _) => check_adt(adt_def.did()),
+        TyKind::Ref(_, inner, _) => {
+            if let TyKind::Adt(adt_def, _) = inner.kind() {
+                check_adt(adt_def.did())
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Escape any tracked locals passed as raw pointers to an opaque call.
 fn escape_raw_ptr_args<'tcx>(
     state: &mut BlockState,
     body: &Body<'tcx>,
@@ -205,29 +253,45 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.ends_with("::into_non_null")
         || path.ends_with("::into_raw_parts")
         || path.ends_with("::into_raw_parts_with_alloc");
-    let crate_matches = path.contains("Box")
-        || path.contains("Arc")
-        || path.contains("Rc")
-        || path.contains("Vec")
-        || path.contains("String")
-        || path.contains("Thread");
-    tail_matches && crate_matches
+    let type_matches = path.contains("::Box::")
+        || path.contains("::Box<")
+        || path.contains("::Arc::")
+        || path.contains("::Arc<")
+        || path.contains("::Rc::")
+        || path.contains("::Rc<")
+        || path.contains("::Vec::")
+        || path.contains("::Vec<")
+        || path.contains("::String::")
+        || path.contains("::Thread::")
+        || path.contains("::Weak::")
+        || path.contains("::Weak<");
+    tail_matches && type_matches
 }
 
 pub fn is_from_raw(path: &str) -> bool {
     let direct = path.ends_with("::from_raw")
-        && (path.contains("Box")
-            || path.contains("Arc")
-            || path.contains("Rc")
-            || path.contains("Weak")
-            || path.contains("Thread"));
+        && (path.contains("::Box::")
+            || path.contains("::Box<")
+            || path.contains("::Arc::")
+            || path.contains("::Arc<")
+            || path.contains("::Rc::")
+            || path.contains("::Rc<")
+            || path.contains("::Weak::")
+            || path.contains("::Weak<")
+            || path.contains("::Thread::"));
     let from_raw_in = path.ends_with("::from_raw_in")
-        && (path.contains("Box") || path.contains("Arc") || path.contains("Rc"));
-    let from_non_null =
-        (path.ends_with("::from_non_null") || path.ends_with("::from_non_null_in"))
-            && path.contains("Box");
-    let vec_parts = (path.ends_with("::from_raw_parts") || path.ends_with("::from_raw_parts_in"))
-        && (path.contains("Vec") || path.contains("String"));
+        && (path.contains("::Box::")
+            || path.contains("::Box<")
+            || path.contains("::Arc::")
+            || path.contains("::Arc<")
+            || path.contains("::Rc::")
+            || path.contains("::Rc<"));
+    let from_non_null = (path.ends_with("::from_non_null")
+        || path.ends_with("::from_non_null_in"))
+        && (path.contains("::Box::") || path.contains("::Box<"));
+    let vec_parts = (path.ends_with("::from_raw_parts")
+        || path.ends_with("::from_raw_parts_in"))
+        && (path.contains("::Vec::") || path.contains("::Vec<") || path.contains("::String::"));
     direct || from_raw_in || from_non_null || vec_parts
 }
 
@@ -239,13 +303,19 @@ pub fn is_epoch_pin(path: &str) -> bool {
     (path.ends_with("::pin") || path.ends_with("::pin_reuse")) && path.contains("epoch")
 }
 
+/// Matches lock *acquisition* methods on well-known sync primitives.
+/// `::read` and `::write` are deliberately excluded — they are too ambiguous
+/// with async RwLock types that return futures instead of guards.
 pub fn is_lock_acquire(path: &str) -> bool {
     let is_acquire = path.ends_with("::lock")
         || path.ends_with("::try_lock")
-        || path.ends_with("::write")
-        || path.ends_with("::read")
         || path.ends_with("::lock_arc");
-    let is_sync = path.contains("Mutex") || path.contains("RwLock") || path.contains("ReentrantMutex");
+    let is_sync = path.contains("::Mutex::")
+        || path.contains("::Mutex<")
+        || path.contains("::RwLock::")
+        || path.contains("::RwLock<")
+        || path.contains("::ReentrantMutex::")
+        || path.contains("::ReentrantMutex<");
     is_acquire && is_sync
 }
 

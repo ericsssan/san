@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ProtocolId(pub u32);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
