@@ -4,6 +4,7 @@ use rustc_middle::mir::{BasicBlock, BasicBlockData, Body, TerminatorKind, Unwind
 use rustc_middle::ty::TyCtxt;
 
 use crate::analysis::state::BlockState;
+use crate::analysis::summary::SummaryMap;
 use crate::analysis::transfer::{apply_statement, apply_terminator};
 
 pub struct FlowResults {
@@ -35,12 +36,39 @@ impl FlowResults {
 
 /// Forward worklist fixpoint over `body`. Findings are NOT generated here —
 /// this is pure state computation. Call `FlowChecker::check_flow` afterwards.
-pub fn compute_flow<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> FlowResults {
+pub fn compute_flow<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    summaries: &SummaryMap,
+) -> FlowResults {
+    run_fixpoint(tcx, body, BlockState::default(), summaries)
+}
+
+/// Like `compute_flow` but seeds the entry block with the raw-pointer
+/// parameters marked as `RawOwned`. Used during summary extraction so the
+/// analysis models the effect of the function on its own arguments.
+pub fn compute_flow_for_summary<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    summaries: &SummaryMap,
+) -> FlowResults {
+    use crate::analysis::summary::summary_initial_state;
+    run_fixpoint(tcx, body, summary_initial_state(body), summaries)
+}
+
+/// Internal worklist fixpoint engine. Both `compute_flow` and
+/// `compute_flow_for_summary` are thin wrappers around this function.
+fn run_fixpoint<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    initial_state: BlockState,
+    summaries: &SummaryMap,
+) -> FlowResults {
     let num_blocks = body.basic_blocks.len();
     let mut entry_states: Vec<Option<BlockState>> = vec![None; num_blocks];
 
     // Seed the entry block.
-    entry_states[0] = Some(BlockState::default());
+    entry_states[0] = Some(initial_state);
 
     let mut worklist: VecDeque<BasicBlock> = VecDeque::new();
     let mut in_worklist: HashSet<BasicBlock> = HashSet::new();
@@ -64,7 +92,7 @@ pub fn compute_flow<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> FlowResults {
             apply_statement(&mut state, tcx, body, stmt);
         }
         if let Some(term) = &block_data.terminator {
-            apply_terminator(&mut state, tcx, body, bb, term);
+            apply_terminator(&mut state, tcx, body, bb, term, summaries);
         }
 
         // Propagate to each successor.

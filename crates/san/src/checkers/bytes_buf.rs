@@ -19,18 +19,18 @@
 /// **`UninitSlice::as_uninit_slice_mut(&mut self)`**: returns the underlying
 /// `&mut [MaybeUninit<u8>]`; reading unwritten bytes from this slice is UB.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct BytesBuf;
 
 impl Checker for BytesBuf {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -66,6 +66,22 @@ impl Checker for BytesBuf {
             } else {
                 continue;
             };
+
+            // Suppress `advance_mut` findings when bytes were demonstrably written to the
+            // buffer on ALL predecessor paths (buf_written is intersection across join points).
+            if path.ends_with("::advance_mut") && path.contains("bytes") {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    // The self/buf argument is args[0].
+                    if let Some(buf_local) = args.first().and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) => Some(p.local),
+                        _ => None,
+                    }) {
+                        if state.buf_written.contains(&buf_local) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "bytes_buf",

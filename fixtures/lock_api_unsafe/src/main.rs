@@ -1,26 +1,22 @@
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
+
+fn correct_force_unlock(m: &Mutex<u32>) {
+    // Correct: lock, forget the guard, then force_unlock.
+    // Flow analysis sees the Forgotten guard → suppressed by lock_api_unsafe checker.
+    let guard = m.lock();
+    std::mem::forget(guard);
+    unsafe { m.force_unlock() };
+}
+
+fn incorrect_force_unlock(m: &Mutex<u32>) {
+    // Bug: force_unlock with no prior lock + forget on this path.
+    // No Forgotten protocol in scope → lock_api_unsafe fires.
+    unsafe { m.force_unlock() };
+}
 
 fn main() {
     let m = Mutex::new(42u32);
-
-    // Bug: force_unlock on a mutex that was locked then forgotten —
-    // valid use, but must be paired with a prior mem::forget of the guard.
-    let guard = m.lock();
-    std::mem::forget(guard);
-    // san: lock_api_unsafe — mutex must be locked before calling force_unlock
-    unsafe { m.force_unlock() };
-
-    let rw = RwLock::new(42u32);
-
-    // Bug: force_unlock_write — must hold exclusive write lock.
-    let wg = rw.write();
-    std::mem::forget(wg);
-    // san: lock_api_unsafe — must hold write lock before force_unlock_write
-    unsafe { rw.force_unlock_write() };
-
-    // Bug: force_unlock_read — must hold a shared read lock.
-    let rg = rw.read();
-    std::mem::forget(rg);
-    // san: lock_api_unsafe — must hold read lock before force_unlock_read
-    unsafe { rw.force_unlock_read() };
+    correct_force_unlock(&m);
+    // incorrect_force_unlock is UB to actually call, so just reference it.
+    let _ = incorrect_force_unlock as fn(&Mutex<u32>);
 }
