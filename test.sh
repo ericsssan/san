@@ -141,6 +141,9 @@ declare -A EXPECTED=(
     [time_tz_unchecked]="time_tz_unchecked"
     [rustix_unsafe]="rustix_unsafe"
     [typed_arena_unchecked]="typed_arena_unchecked"
+    # flow-sensitive checkers
+    [flow_ownership]="ownership_double_free"
+    [flow_ownership_leak]="ownership_leak"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""

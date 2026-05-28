@@ -10,6 +10,7 @@ use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::mir;
 use rustc_middle::ty::TyCtxt;
 
+pub mod analysis;
 pub mod checkers;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,17 @@ pub trait Checker: Send + Sync {
         let _ = tcx;
         Vec::new()
     }
+}
+
+/// A checker that operates on pre-computed flow-sensitive analysis results.
+/// `check_flow` is called once per MIR body after the fixpoint has converged.
+pub trait FlowChecker: Send + Sync {
+    fn check_flow<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &mir::Body<'tcx>,
+        flow: &analysis::FlowResults,
+    ) -> Vec<Finding>;
 }
 
 static CHECKERS: &[&(dyn Checker + Sync)] = &[
@@ -175,6 +187,12 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::typed_arena_unchecked::TypedArenaUnchecked,
 ];
 
+static FLOW_CHECKERS: &[&(dyn FlowChecker + Sync)] = &[
+    &checkers::flow::ownership::OwnershipProtocol,
+    &checkers::flow::epoch_guard::EpochGuard,
+    &checkers::flow::lock_state::LockState,
+];
+
 pub fn debug_print_all_paths(tcx: TyCtxt<'_>) {
     use rustc_middle::mir::TerminatorKind;
     for &local_def_id in tcx.mir_keys(()).iter() {
@@ -216,6 +234,10 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
         let body = tcx.optimized_mir(def_id);
         for checker in CHECKERS {
             findings.extend(checker.check(tcx, body));
+        }
+        let flow = analysis::compute_flow(tcx, body);
+        for checker in FLOW_CHECKERS {
+            findings.extend(checker.check_flow(tcx, body, &flow));
         }
     }
 
