@@ -18,6 +18,8 @@
 ///
 /// RustSec: appears in RUSTSEC-2020-0146 (heapsize), custom Vec implementations,
 /// and every crate that hand-rolls MaybeUninit-based collections.
+use crate::analysis::object::HeapState;
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -25,12 +27,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct PtrRead;
 
 impl Checker for PtrRead {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -84,6 +86,20 @@ impl Checker for PtrRead {
             } else {
                 continue;
             };
+
+            // Suppress if flow tracks this pointer as coming from a live into_raw (still valid)
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(ptr_local) = first_arg_local(args) {
+                    let mut objs = state.objects_for(ptr_local).peekable();
+                    if objs.peek().is_some() {
+                        let all_raw_owned = state.objects_for(ptr_local)
+                            .all(|id| matches!(state.heap.get(&id), Some(HeapState::RawOwned)));
+                        if all_raw_owned {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "ptr_read",
