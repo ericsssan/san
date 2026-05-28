@@ -20,6 +20,7 @@
 ///
 /// RustSec: RUSTSEC-2021-0050 (containers), RUSTSEC-2021-0003 (renderdoc-sys),
 /// and many FFI boundary crates that pass Box pointers across ABI boundaries.
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -27,12 +28,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct BoxFromRaw;
 
 impl Checker for BoxFromRaw {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -61,6 +62,17 @@ impl Checker for BoxFromRaw {
             } else {
                 continue;
             };
+
+            // Suppress when flow is tracking this pointer — it came from a known
+            // `into_raw` in the same function. OwnershipProtocol handles the precise
+            // intra-procedural analysis. Only fire for inter-procedural / escaped cases.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg_local) = first_arg_local(args) {
+                    if state.objects_for(arg_local).next().is_some() {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "box_from_raw",

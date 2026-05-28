@@ -28,6 +28,7 @@
 ///     handle while a guard is still live causes a double-unlock → UB
 ///
 /// RustSec: RUSTSEC-2020-0070 (lock_api guard `Send`/`Sync` bounds).
+use crate::analysis::transfer::is_force_unlock;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -35,10 +36,10 @@ use rustc_middle::ty::TyCtxt;
 pub struct LockApiUnsafe;
 
 impl Checker for LockApiUnsafe {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
             let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
@@ -114,6 +115,17 @@ impl Checker for LockApiUnsafe {
             } else {
                 continue;
             };
+
+            // For force_unlock*, suppress when flow confirms a guard was forgotten
+            // in this function (the correct usage pattern). LockState handles the
+            // violation case. Keep firing when flow has no information (inter-procedural).
+            if is_force_unlock(&path) {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if state.has_forgotten_protocol() {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "lock_api_unsafe",

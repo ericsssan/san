@@ -43,6 +43,7 @@
 ///
 /// Real-world: RUSTSEC-2019-0009 (crossbeam-epoch 0.7) — a missing memory
 /// barrier allowed Shared pointers to outlive their epoch protection.
+use crate::analysis::transfer::is_shared_deref;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -50,10 +51,10 @@ use rustc_middle::ty::TyCtxt;
 pub struct CrossbeamEpoch;
 
 impl Checker for CrossbeamEpoch {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
             let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
@@ -148,6 +149,19 @@ impl Checker for CrossbeamEpoch {
             } else {
                 continue;
             };
+
+            // For deref/defer_destroy operations, suppress when flow confirms all
+            // guards in scope are still Active — EpochGuard handles the violation case.
+            // Keep firing for non-deref operations (Shared::into_owned, unprotected, etc.)
+            // and for deref when flow has no guard information (inter-procedural).
+            if is_shared_deref(&path) || path.ends_with("::defer_destroy") {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if !state.has_hazard_protocol() && !state.typestate.is_empty() {
+                        // Flow sees active guards and none are in hazard state — safe.
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "crossbeam_epoch",

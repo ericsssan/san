@@ -16,14 +16,14 @@
 /// interprocedural analysis.
 use crate::analysis::transfer::is_shared_deref;
 use crate::analysis::FlowResults;
-use crate::{Finding, FlowChecker, Severity};
+use crate::{Finding, Checker, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct EpochGuard;
 
-impl FlowChecker for EpochGuard {
-    fn check_flow<'tcx>(
+impl Checker for EpochGuard {
+    fn check<'tcx>(
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,

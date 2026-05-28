@@ -43,7 +43,7 @@ use rustc_middle::ty::TyCtxt;
 pub struct MemmapUnsafe;
 
 impl Checker for MemmapUnsafe {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
         for block_data in body.basic_blocks.iter() {

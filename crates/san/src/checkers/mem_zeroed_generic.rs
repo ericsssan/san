@@ -26,7 +26,7 @@ use rustc_middle::ty::{self, TyCtxt};
 pub struct MemZeroedGeneric;
 
 impl Checker for MemZeroedGeneric {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
         for block_data in body.basic_blocks.iter() {
