@@ -3,5 +3,16 @@
 version = 4
 
 [[package]]
+name = "cargo-san"
+version = "0.1.0"
+
+[[package]]
 name = "san"
 version = "0.1.0"
+
+[[package]]
+name = "san-driver"
+version = "0.1.0"
+dependencies = [
+ "san",
+]
