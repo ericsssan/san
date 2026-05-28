@@ -16,14 +16,14 @@
 use crate::analysis::object::HeapState;
 use crate::analysis::transfer::{first_arg_local, is_from_raw};
 use crate::analysis::FlowResults;
-use crate::{Finding, FlowChecker, Severity};
+use crate::{Finding, Checker, Severity};
 use rustc_middle::mir::{Body, Local, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct OwnershipProtocol;
 
-impl FlowChecker for OwnershipProtocol {
-    fn check_flow<'tcx>(
+impl Checker for OwnershipProtocol {
+    fn check<'tcx>(
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,

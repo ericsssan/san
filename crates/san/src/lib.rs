@@ -28,30 +28,24 @@ pub struct Finding {
     pub message: String,
 }
 
+/// Unified checker trait. Every checker receives pre-computed flow results so
+/// it can optionally suppress findings that flow analysis shows are safe.
+/// `check_crate` is for whole-crate HIR passes (impl-block analysis, etc.).
 pub trait Checker: Send + Sync {
-    /// Called once per MIR body (function, closure, const, etc.).
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &mir::Body<'tcx>) -> Vec<Finding> {
-        let _ = (tcx, body);
-        Vec::new()
-    }
-
-    /// Called once per crate for checkers that need whole-crate HIR visibility
-    /// (e.g. impl-block analysis). Default: no-op.
-    fn check_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Vec<Finding> {
-        let _ = tcx;
-        Vec::new()
-    }
-}
-
-/// A checker that operates on pre-computed flow-sensitive analysis results.
-/// `check_flow` is called once per MIR body after the fixpoint has converged.
-pub trait FlowChecker: Send + Sync {
-    fn check_flow<'tcx>(
+    fn check<'tcx>(
         &self,
         tcx: TyCtxt<'tcx>,
         body: &mir::Body<'tcx>,
         flow: &analysis::FlowResults,
-    ) -> Vec<Finding>;
+    ) -> Vec<Finding> {
+        let _ = (tcx, body, flow);
+        Vec::new()
+    }
+
+    fn check_crate<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Vec<Finding> {
+        let _ = tcx;
+        Vec::new()
+    }
 }
 
 static CHECKERS: &[&(dyn Checker + Sync)] = &[
@@ -185,9 +179,7 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::time_tz_unchecked::TimeTzUnchecked,
     &checkers::rustix_unsafe::RustixUnsafe,
     &checkers::typed_arena_unchecked::TypedArenaUnchecked,
-];
-
-static FLOW_CHECKERS: &[&(dyn FlowChecker + Sync)] = &[
+    // Flow-sensitive checkers (use flow results for precise detection).
     &checkers::flow::ownership::OwnershipProtocol,
     &checkers::flow::epoch_guard::EpochGuard,
     &checkers::flow::lock_state::LockState,
@@ -218,13 +210,13 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
 
     let mut findings = Vec::new();
 
-    // Crate-level checks (HIR, impl blocks, etc.)
+    // Crate-level (HIR) checks — flow is not applicable here.
     for checker in CHECKERS {
         findings.extend(checker.check_crate(tcx));
     }
 
-    // Per-body MIR checks — functions and closures only.
-    // Constants/statics use mir_for_ctfe, not optimized_mir; skip them here.
+    // Per-body MIR checks. Flow is computed once per body and passed to every
+    // checker so they can optionally suppress findings that flow shows are safe.
     for &local_def_id in tcx.mir_keys(()).iter() {
         let def_id = local_def_id.to_def_id();
         match tcx.def_kind(def_id) {
@@ -232,12 +224,9 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
             _ => continue,
         }
         let body = tcx.optimized_mir(def_id);
-        for checker in CHECKERS {
-            findings.extend(checker.check(tcx, body));
-        }
         let flow = analysis::compute_flow(tcx, body);
-        for checker in FLOW_CHECKERS {
-            findings.extend(checker.check_flow(tcx, body, &flow));
+        for checker in CHECKERS {
+            findings.extend(checker.check(tcx, body, &flow));
         }
     }
 

@@ -16,14 +16,14 @@
 /// forgotten. That requires interprocedural alias tracking.
 use crate::analysis::transfer::is_force_unlock;
 use crate::analysis::FlowResults;
-use crate::{Finding, FlowChecker, Severity};
+use crate::{Finding, Checker, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct LockState;
 
-impl FlowChecker for LockState {
-    fn check_flow<'tcx>(
+impl Checker for LockState {
+    fn check<'tcx>(
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,
