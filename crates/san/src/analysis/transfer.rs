@@ -4,8 +4,9 @@ use rustc_middle::mir::{
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
 
-use crate::analysis::object::{HeapState, ObjectId};
+use crate::analysis::object::{HeapState, InitState, ObjectId};
 use crate::analysis::state::BlockState;
+use crate::analysis::summary::{apply_fn_summary, SummaryMap};
 use crate::analysis::typestate::{ProtocolId, ProtocolState};
 
 pub fn apply_statement<'tcx>(
@@ -44,6 +45,18 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.local_proto.remove(&dst_local);
             }
+            // Transfer init state: move src → dst, clear src.
+            if let Some(init) = state.init.remove(&src_local) {
+                state.init.insert(dst_local, init);
+            } else {
+                state.init.remove(&dst_local);
+            }
+            // Transfer buf_written: move src → dst, clear src.
+            if state.buf_written.remove(&src_local) {
+                state.buf_written.insert(dst_local);
+            } else {
+                state.buf_written.remove(&dst_local);
+            }
         }
         Rvalue::Use(Operand::Copy(src), _) if src.projection.is_empty() => {
             // Copy: alias — dst points to the same objects as src.
@@ -58,17 +71,33 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.local_proto.remove(&dst_local);
             }
+            // Copy init state: dst gets the same state as src.
+            if let Some(init) = state.init.get(&src_local).cloned() {
+                state.init.insert(dst_local, init);
+            } else {
+                state.init.remove(&dst_local);
+            }
+            // Copy buf_written: dst is written if src was written.
+            if state.buf_written.contains(&src_local) {
+                state.buf_written.insert(dst_local);
+            } else {
+                state.buf_written.remove(&dst_local);
+            }
         }
         _ => {
             // Unknown rvalue: clear tracking on dst.
             state.points_to.remove(&dst_local);
             state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
             // For a projected move, also clear the base local to prevent stale tracking.
             // E.g. `_dst = move _src.field` leaves `_src` tracked but field is gone.
             if let Rvalue::Use(Operand::Move(src), _) = rvalue {
                 if !src.projection.is_empty() {
                     state.points_to.remove(&src.local);
                     state.local_proto.remove(&src.local);
+                    state.init.remove(&src.local);
+                    state.buf_written.remove(&src.local);
                 }
             }
         }
@@ -81,6 +110,7 @@ pub fn apply_terminator<'tcx>(
     body: &Body<'tcx>,
     bb: BasicBlock,
     term: &Terminator<'tcx>,
+    summaries: &SummaryMap,
 ) {
     match &term.kind {
         TerminatorKind::Call { func, args, destination, .. } => {
@@ -103,6 +133,8 @@ pub fn apply_terminator<'tcx>(
                 state.points_to.insert(dest, std::iter::once(obj_id).collect());
                 // Strong update: mark as freshly owned regardless of prior state.
                 state.heap.insert(obj_id, HeapState::RawOwned);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             } else if is_from_raw(&path) {
                 if let Some(src) = first_arg_local(args) {
                     let objs: Vec<_> = state.objects_for(src).collect();
@@ -116,6 +148,8 @@ pub fn apply_terminator<'tcx>(
                 }
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             } else if is_mem_forget(&path) {
                 // Use base-local extraction so `mem::forget(container.field)` is handled.
                 if let Some(src) = first_arg_base_local(args) {
@@ -137,22 +171,55 @@ pub fn apply_terminator<'tcx>(
                             state.untracked_forget_seen = true;
                         }
                     }
+                    state.init.remove(&src);
+                    state.buf_written.remove(&src);
                 }
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             } else if is_epoch_pin(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
                 state.local_proto.entry(dest).or_default().insert(proto_id);
                 state.typestate.insert(proto_id, ProtocolState::Active);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             } else if is_lock_acquire(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
                 state.local_proto.entry(dest).or_default().insert(proto_id);
                 state.typestate.insert(proto_id, ProtocolState::Active);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
+            } else if is_maybe_uninit_init(&path) {
+                // MaybeUninit::new(val), MaybeUninit::zeroed(), or MaybeUninit::write(val) —
+                // the destination is provably initialized.
+                state.init.insert(dest, InitState::Initialized);
+                state.buf_written.remove(&dest);
+                state.points_to.remove(&dest);
+                state.local_proto.remove(&dest);
+            } else if is_buf_write(&path) {
+                // BufMut::put_slice / put_bytes / put — the self/buf argument has bytes written.
+                // Record that the first argument (the buf local) had bytes written to it.
+                if let Some(buf_local) = first_arg_local(args) {
+                    state.buf_written.insert(buf_local);
+                }
+                // The return dest (usually unit) gets cleared of any stale tracking.
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
+                state.points_to.remove(&dest);
+                state.local_proto.remove(&dest);
+            } else if let Some(summary) = summaries.get(&def_id) {
+                // Known local function: apply its pre-computed interprocedural summary.
+                apply_fn_summary(state, body, args, dest, bb, summary);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             } else {
                 // Unrecognized call: escape any tracked raw-pointer args, clear dest.
                 escape_raw_ptr_args(state, body, args);
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
             }
         }
 
@@ -167,6 +234,8 @@ pub fn apply_terminator<'tcx>(
                 // Don't remove from heap: RawOwned objects dropped here are leaks,
                 // and the checker needs to see them at Return.
                 state.points_to.remove(&local);
+                state.init.remove(&local);
+                state.buf_written.remove(&local);
             }
         }
 
@@ -331,4 +400,17 @@ pub fn is_force_unlock(path: &str) -> bool {
 pub fn is_shared_deref(path: &str) -> bool {
     (path.ends_with("::deref") || path.ends_with("::deref_mut") || path.ends_with("::as_ref"))
         && path.contains("Shared")
+}
+
+/// Returns `true` for `MaybeUninit` constructors that produce a provably initialized value:
+/// `MaybeUninit::new(val)`, `MaybeUninit::zeroed()`, and `MaybeUninit::write(val)`.
+pub fn is_maybe_uninit_init(path: &str) -> bool {
+    path.contains("MaybeUninit")
+        && (path.ends_with("::new") || path.ends_with("::zeroed") || path.ends_with("::write"))
+}
+
+/// Returns `true` for `BufMut` write methods that guarantee bytes are written before advancing:
+/// `put_slice`, `put_bytes`, `put`.
+pub fn is_buf_write(path: &str) -> bool {
+    path.ends_with("::put_slice") || path.ends_with("::put_bytes") || path.ends_with("::put")
 }

@@ -1,8 +1,8 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rustc_middle::mir::Local;
 
-use crate::analysis::object::{HeapMap, HeapState, ObjectId};
+use crate::analysis::object::{HeapMap, HeapState, InitState, ObjectId};
 use crate::analysis::typestate::{ProtocolId, ProtocolState, TypestateMap};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -17,6 +17,16 @@ pub struct BlockState {
     /// typically a guard received as a function parameter. Used by the lock-state
     /// checker to avoid false positives when force_unlock follows a parameter-guard forget.
     pub untracked_forget_seen: bool,
+    /// Tracks whether each `MaybeUninit` local is provably initialized.
+    /// Absence from the map means `Unknown`. Join is per-key: Initialized ⊓ Unknown = Unknown.
+    /// Keys present in only one branch are inserted with `Unknown` conservatively — actually
+    /// for keys only in `other`, we propagate them as-is (they weren't observed on `self`'s
+    /// path, so we union in the new info with `changed = true`).
+    pub init: HashMap<Local, InitState>,
+    /// Locals that are known to have had bytes written to a `BufMut` region before any
+    /// `advance_mut` call. Join is INTERSECTION: a local is only "written" if ALL predecessor
+    /// paths wrote to it (so we only suppress `advance_mut` when we are certain).
+    pub buf_written: HashSet<Local>,
 }
 
 impl BlockState {
@@ -76,6 +86,39 @@ impl BlockState {
             result.untracked_forget_seen = true;
             changed = true;
         }
+
+        // Join init maps: for keys in both, join the values; for keys only in other,
+        // insert them (we gained new information about a branch's init state).
+        for (local, other_init) in &other.init {
+            match result.init.get(local).cloned() {
+                None => {
+                    // Key was absent on self's path; propagate other's value.
+                    result.init.insert(*local, other_init.clone());
+                    changed = true;
+                }
+                Some(self_init) => {
+                    let joined = self_init.join(other_init);
+                    if joined != self_init {
+                        changed = true;
+                        result.init.insert(*local, joined);
+                    }
+                }
+            }
+        }
+
+        // Join buf_written: INTERSECTION — only keep locals written on ALL paths.
+        // If self has locals that other does NOT have, they must be removed (not all paths wrote).
+        let new_buf_written: HashSet<Local> = result
+            .buf_written
+            .iter()
+            .copied()
+            .filter(|l| other.buf_written.contains(l))
+            .collect();
+        if new_buf_written != result.buf_written {
+            changed = true;
+            result.buf_written = new_buf_written;
+        }
+        // Locals only in other are not added (intersection excludes them).
 
         (result, changed)
     }

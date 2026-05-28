@@ -210,6 +210,39 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
 
     let mut findings = Vec::new();
 
+    // Collect all local fn DefIds for reuse across passes.
+    let local_fns: Vec<_> = tcx
+        .mir_keys(())
+        .iter()
+        .filter_map(|&id| {
+            let def_id = id.to_def_id();
+            matches!(
+                tcx.def_kind(def_id),
+                DefKind::Fn
+                    | DefKind::AssocFn
+                    | DefKind::Closure
+                    | DefKind::SyntheticCoroutineBody
+            )
+            .then_some(def_id)
+        })
+        .collect();
+
+    // Two-pass interprocedural summary computation.
+    // Pass 1 seeds with an empty map so every callee is treated as opaque.
+    // Pass 2 refines with the Pass 1 summaries, resolving one level of call depth.
+    let mut summaries = analysis::SummaryMap::new();
+    for _ in 0..2 {
+        let snap = summaries.clone();
+        for &def_id in &local_fns {
+            let body = tcx.optimized_mir(def_id);
+            let flow = analysis::compute_flow_for_summary(tcx, body, &snap);
+            let s = analysis::summary::extract_summary(body, &flow);
+            if !s.param_effects.is_empty() || s.returns_raw_owned {
+                summaries.insert(def_id, s);
+            }
+        }
+    }
+
     // Crate-level (HIR) checks — flow is not applicable here.
     for checker in CHECKERS {
         findings.extend(checker.check_crate(tcx));
@@ -217,14 +250,9 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
 
     // Per-body MIR checks. Flow is computed once per body and passed to every
     // checker so they can optionally suppress findings that flow shows are safe.
-    for &local_def_id in tcx.mir_keys(()).iter() {
-        let def_id = local_def_id.to_def_id();
-        match tcx.def_kind(def_id) {
-            DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::SyntheticCoroutineBody => {}
-            _ => continue,
-        }
+    for &def_id in &local_fns {
         let body = tcx.optimized_mir(def_id);
-        let flow = analysis::compute_flow(tcx, body);
+        let flow = analysis::compute_flow(tcx, body, &summaries);
         for checker in CHECKERS {
             findings.extend(checker.check(tcx, body, &flow));
         }
