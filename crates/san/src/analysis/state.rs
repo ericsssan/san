@@ -27,6 +27,14 @@ pub struct BlockState {
     /// `advance_mut` call. Join is INTERSECTION: a local is only "written" if ALL predecessor
     /// paths wrote to it (so we only suppress `advance_mut` when we are certain).
     pub buf_written: HashSet<Local>,
+    /// cmp_result_local → lhs_local: this comparison-result local holds (lhs < something).
+    /// Used for bounds range tracking. Join is UNION.
+    pub lt_facts: HashMap<Local, Local>,
+    /// cmp_result_local → lhs_local: this comparison-result local holds (lhs >= something).
+    /// Used for bounds range tracking. Join is UNION.
+    pub ge_facts: HashMap<Local, Local>,
+    /// Locals proven to be < some length (via Assert terminator). Join is INTERSECTION.
+    pub bounded: HashSet<Local>,
 }
 
 impl BlockState {
@@ -119,6 +127,34 @@ impl BlockState {
             result.buf_written = new_buf_written;
         }
         // Locals only in other are not added (intersection excludes them).
+
+        // Join lt_facts: UNION — propagate any comparison facts from either branch.
+        for (local, lhs) in &other.lt_facts {
+            result.lt_facts.entry(*local).or_insert_with(|| {
+                changed = true;
+                *lhs
+            });
+        }
+
+        // Join ge_facts: UNION — same pattern as lt_facts.
+        for (local, lhs) in &other.ge_facts {
+            result.ge_facts.entry(*local).or_insert_with(|| {
+                changed = true;
+                *lhs
+            });
+        }
+
+        // Join bounded: INTERSECTION — a local is only proven bounded on ALL paths.
+        let new_bounded: HashSet<Local> = result
+            .bounded
+            .iter()
+            .copied()
+            .filter(|l| other.bounded.contains(l))
+            .collect();
+        if new_bounded != result.bounded {
+            changed = true;
+            result.bounded = new_bounded;
+        }
 
         (result, changed)
     }
