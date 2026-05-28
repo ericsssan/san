@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use rustc_middle::mir::{BasicBlock, BasicBlockData, Body, TerminatorKind, UnwindAction};
 use rustc_middle::ty::TyCtxt;
@@ -43,9 +43,15 @@ pub fn compute_flow<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> FlowResults {
     entry_states[0] = Some(BlockState::default());
 
     let mut worklist: VecDeque<BasicBlock> = VecDeque::new();
-    worklist.push_back(BasicBlock::from_usize(0));
+    let mut in_worklist: HashSet<BasicBlock> = HashSet::new();
+
+    let entry_bb = BasicBlock::from_usize(0);
+    worklist.push_back(entry_bb);
+    in_worklist.insert(entry_bb);
 
     while let Some(bb) = worklist.pop_front() {
+        in_worklist.remove(&bb);
+
         let entry = match &entry_states[bb.index()] {
             Some(s) => s.clone(),
             None => continue,
@@ -76,8 +82,9 @@ pub fn compute_flow<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> FlowResults {
                     changed
                 }
             };
-            if changed {
+            if changed && !in_worklist.contains(&succ) {
                 worklist.push_back(succ);
+                in_worklist.insert(succ);
             }
         }
     }

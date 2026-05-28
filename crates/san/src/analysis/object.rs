@@ -7,7 +7,6 @@ pub struct ObjectId(pub u32);
 pub enum HeapState {
     RawOwned,
     Reconstituted,
-    Freed,
     MaybeFreed,
     Escaped,
 }
@@ -26,7 +25,7 @@ impl HeapState {
     }
 
     pub fn is_hazard(&self) -> bool {
-        matches!(self, HeapState::MaybeFreed | HeapState::Freed)
+        matches!(self, HeapState::MaybeFreed)
     }
 }
 
