@@ -1,4 +1,5 @@
 /target
+fixtures/*/target/
 .envrc
 
 # compiled exploration binaries and scratch files in repo root
