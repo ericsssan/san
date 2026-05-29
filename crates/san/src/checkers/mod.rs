@@ -60,6 +60,7 @@ pub mod layout_for_value_raw;
 pub mod trusted_len_impl;
 pub mod trusted_step_impl;
 pub mod allocator_impl;
+pub mod unsafe_fn_call;
 pub mod unsafe_fn_ptr;
 pub mod slice_chunks_unchecked;
 pub mod split_at_unchecked;
