@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use rustc_hir::def_id::DefId;
 use rustc_middle::mir::Local;
 
 use crate::analysis::object::{HeapMap, HeapState, InitState, ObjectId};
@@ -44,6 +45,11 @@ pub struct BlockState {
     /// leave that owner dangling. Used to detect double-free / UAF where the
     /// second free happens later through the owner (e.g. its `Drop`).
     pub owner_alias: HashMap<Local, BTreeSet<Local>>,
+    /// fn-pointer local → the concrete fn it was reified from (`foo as fn(..)`).
+    /// Lets an *indirect* call through such a pointer be resolved to a known
+    /// target and its summary applied. Join keeps a mapping only if all paths
+    /// agree on the target (must-resolve), so resolution stays conservative.
+    pub fn_ptr_targets: HashMap<Local, DefId>,
 }
 
 impl BlockState {
@@ -176,6 +182,19 @@ impl BlockState {
             if entry.len() != before {
                 changed = true;
             }
+        }
+
+        // Join fn_ptr_targets: keep a mapping only if both paths agree on the
+        // target (must-resolve); drop on conflict or absence.
+        let merged: HashMap<Local, DefId> = result
+            .fn_ptr_targets
+            .iter()
+            .filter(|(l, did)| other.fn_ptr_targets.get(l) == Some(did))
+            .map(|(l, did)| (*l, *did))
+            .collect();
+        if merged != result.fn_ptr_targets {
+            changed = true;
+            result.fn_ptr_targets = merged;
         }
 
         (result, changed)

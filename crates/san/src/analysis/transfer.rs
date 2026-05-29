@@ -1,7 +1,8 @@
 use rustc_middle::mir::{
-    BasicBlock, BinOp, Body, Local, Operand, ProjectionElem, Rvalue, Statement, StatementKind,
-    Terminator, TerminatorKind,
+    BasicBlock, BinOp, Body, CastKind, Local, Operand, ProjectionElem, Rvalue, Statement,
+    StatementKind, Terminator, TerminatorKind,
 };
+use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{TyCtxt, TyKind};
 
 use crate::analysis::object::{HeapState, InitState, ObjectId};
@@ -35,6 +36,7 @@ pub fn apply_statement<'tcx>(
 
     let dst_local = dst.local;
     update_owner_alias(state, body, dst_local, rvalue);
+    update_fn_ptr_target(state, dst_local, rvalue);
 
     match rvalue {
         // Rvalue::Use gained a second field (WithRetag) in this nightly.
@@ -195,7 +197,11 @@ pub fn apply_terminator<'tcx>(
 ) {
     match &term.kind {
         TerminatorKind::Call { func, args, destination, .. } => {
-            let callee = func.const_fn_def().map(|(id, _)| id);
+            // Resolve the callee: a direct fn item, or an indirect call through a
+            // fn pointer whose reified target we tracked (vtable/fn-ptr resolution).
+            let callee = func.const_fn_def().map(|(id, _)| id).or_else(|| {
+                operand_local(func).and_then(|l| state.fn_ptr_targets.get(&l).copied())
+            });
             // An accessor that *returns* a pointer into a parameter does not
             // reassign that parameter, so passing it by `&mut` must not break the
             // alias — skip invalidation for that argument.
@@ -506,6 +512,34 @@ fn update_owner_alias<'tcx>(
         state.owner_alias.remove(&dst);
     } else {
         state.owner_alias.insert(dst, owners);
+    }
+}
+
+/// Track which concrete fn a fn-pointer local was reified from, so an indirect
+/// call through it can be resolved. Established by a `ReifyFnPointer` cast of a
+/// fn item; propagated through plain copies/moves; cleared otherwise.
+fn update_fn_ptr_target<'tcx>(state: &mut BlockState, dst: Local, rvalue: &Rvalue<'tcx>) {
+    match rvalue {
+        Rvalue::Cast(CastKind::PointerCoercion(PointerCoercion::ReifyFnPointer(_), _), op, _) => {
+            if let Some((did, _)) = op.const_fn_def() {
+                state.fn_ptr_targets.insert(dst, did);
+            } else {
+                state.fn_ptr_targets.remove(&dst);
+            }
+        }
+        Rvalue::Use(Operand::Copy(p) | Operand::Move(p), _) if p.projection.is_empty() => {
+            match state.fn_ptr_targets.get(&p.local).copied() {
+                Some(did) => {
+                    state.fn_ptr_targets.insert(dst, did);
+                }
+                None => {
+                    state.fn_ptr_targets.remove(&dst);
+                }
+            }
+        }
+        _ => {
+            state.fn_ptr_targets.remove(&dst);
+        }
     }
 }
 

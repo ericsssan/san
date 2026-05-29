@@ -77,7 +77,14 @@ impl Checker for OwnershipProtocol {
                 }
 
                 TerminatorKind::Call { func, args, .. } => {
-                    let Some((def_id, _)) = func.const_fn_def() else { continue };
+                    // Resolve a direct fn item, or an indirect call through a
+                    // fn pointer whose reified target flow tracked.
+                    let Some(def_id) = func.const_fn_def().map(|(id, _)| id).or_else(|| {
+                        crate::analysis::transfer::operand_local(func)
+                            .and_then(|l| state.fn_ptr_targets.get(&l).copied())
+                    }) else {
+                        continue;
+                    };
                     let path = tcx.def_path_str(def_id);
 
                     // Determine which argument locals this call frees: directly via
