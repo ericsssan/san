@@ -160,6 +160,28 @@ pub fn apply_statement<'tcx>(
                 state.bounded.remove(&dst_local);
             }
         }
+        // Field read: `dst = src.field` (or `dst = src.0` for tuples). dst.projection
+        // is empty (guaranteed by the early return above); src has non-Deref projections.
+        // Propagate the base local's points_to so that `from_raw(w.ptr)` can reconstitute
+        // an object tracked on `w` — otherwise the field copy loses the tracking and
+        // the object stays RawOwned at the function's Return, triggering a spurious leak.
+        Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _)
+            if !src.projection.is_empty()
+                && !src.projection.iter().any(|e| matches!(e, ProjectionElem::Deref)) =>
+        {
+            let src_base = src.local;
+            if let Some(objs) = state.points_to.get(&src_base).cloned() {
+                state.points_to.insert(dst_local, objs);
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
         // Aggregate struct/tuple/enum construction: if any operand carries raw-pointer
         // ownership tracking, propagate it to the aggregate so that returning a struct
         // wrapping an `into_raw` pointer is not falsely reported as a leak. For example,
@@ -399,7 +421,13 @@ pub fn apply_terminator<'tcx>(
                 state.bounded.remove(&dest);
             } else if is_from_raw(&path) {
                 let mut reconstructed_from: Option<Local> = None;
-                if let Some(src) = first_arg_local(args) {
+                // Accept projected places (e.g. `from_raw(w.ptr)`) by falling back to the
+                // base local; same policy as mem::forget.  Using the base is sound: we
+                // reconstitute all objects tracked on it, which is conservative (may miss
+                // leaks of sibling fields) but never produces spurious leak/double-free.
+                let src_local =
+                    first_arg_local(args).or_else(|| first_arg_base_local(args));
+                if let Some(src) = src_local {
                     let objs: Vec<_> = state.objects_for(src).collect();
                     for id in objs {
                         // Transition RawOwned → Reconstituted so the checker can detect

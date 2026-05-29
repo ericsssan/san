@@ -98,7 +98,10 @@ impl Checker for OwnershipProtocol {
                     // parameter (e.g. smallvec's `deallocate` → `Vec::from_raw_parts`).
                     let mut freed: Vec<Local> = Vec::new();
                     if is_from_raw(&path) {
-                        freed.extend(first_arg_local(args));
+                        freed.extend(
+                            first_arg_local(args)
+                                .or_else(|| crate::analysis::transfer::first_arg_base_local(args)),
+                        );
                     } else if let Some(summary) = flow.summaries.get(&def_id) {
                         for (idx, effect) in &summary.param_effects {
                             if *effect == ParamHeapEffect::Reconstituted {
@@ -143,7 +146,11 @@ impl Checker for OwnershipProtocol {
                         continue;
                     }
 
-                    let Some(arg_local) = first_arg_local(args) else { continue };
+                    let Some(arg_local) = first_arg_local(args)
+                        .or_else(|| crate::analysis::transfer::first_arg_base_local(args))
+                    else {
+                        continue;
+                    };
 
                     for obj_id in state.objects_for(arg_local) {
                         match state.heap.get(&obj_id) {
