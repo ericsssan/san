@@ -39,6 +39,11 @@ pub struct FnSummary {
     /// whatever it passed for parameter `n`, so freeing it would leave that
     /// argument dangling.
     pub returns_alias_of_param: Option<usize>,
+    /// `Some(n)` when the function reallocates the backing buffer of parameter
+    /// `n` (a Vec/String realloc somewhere inside, possibly via a wrapper like
+    /// `BitVec::into_boxed_slice`). Any pointer the caller holds into that
+    /// buffer is invalidated by the call — a use afterward is a use-after-free.
+    pub reallocs_param: Option<usize>,
 }
 
 /// Maps local DefIds to their pre-computed summaries.
@@ -96,7 +101,12 @@ pub fn extract_summary<'tcx>(
     }
 
     let Some(exit_state) = joined else {
-        return FnSummary { param_effects: vec![], returns_raw_owned: false, returns_alias_of_param: None };
+        return FnSummary {
+            param_effects: vec![],
+            returns_raw_owned: false,
+            returns_alias_of_param: None,
+            reallocs_param: None,
+        };
     };
 
     // Determine per-parameter effects.
@@ -128,7 +138,15 @@ pub fn extract_summary<'tcx>(
         (k >= 1 && k <= body.arg_count).then(|| k - 1)
     });
 
-    FnSummary { param_effects, returns_raw_owned, returns_alias_of_param }
+    // A parameter whose buffer was reallocated anywhere in the body (tracked in
+    // `realloced_params`) yields a `reallocs_param` effect — propagated up
+    // through wrapper methods so a caller's pointer into that buffer is flagged.
+    let reallocs_param = exit_state.realloced_params.iter().find_map(|owner| {
+        let k = owner.as_usize();
+        (k >= 1 && k <= body.arg_count).then(|| k - 1)
+    });
+
+    FnSummary { param_effects, returns_raw_owned, returns_alias_of_param, reallocs_param }
 }
 
 // ── apply_fn_summary ──────────────────────────────────────────────────────────

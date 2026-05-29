@@ -213,31 +213,56 @@ pub fn apply_terminator<'tcx>(
             // capacity-conditional), so a later use is flagged as a potential
             // use-after-free. Done BEFORE invalidate_owner_args, which would
             // otherwise drop the aliases on the `&mut` receiver.
-            if callee.is_some_and(|id| is_reallocating_method(&tcx.def_path_str(id))) {
-                if let Some(recv) = args.first().and_then(|a| operand_local(&a.node)) {
-                    let owners: Vec<Local> = state.owners_of(recv).collect();
-                    // Only raw-pointer locals are invalidated by a realloc: a
-                    // `*mut`/`*const` taken into the buffer goes stale. A `&mut Vec`
-                    // reference that merely aliases the owner is NOT stale (the Vec
-                    // itself remains valid) and must not be marked, or an opaque
-                    // call's arg-escape would corrupt the shared state.
-                    let stale: Vec<Local> = state
-                        .owner_alias
-                        .iter()
-                        .filter(|(p, set)| {
-                            owners.iter().any(|o| set.contains(o))
-                                && matches!(body.local_decls[**p].ty.kind(), TyKind::RawPtr(..))
-                        })
-                        .map(|(p, _)| *p)
-                        .collect();
-                    for p in stale {
-                        // Distinct object per stale pointer (namespaced away from
-                        // call-site and summary object ids) so they don't share state.
-                        let obj = ObjectId(REALLOC_BASE + p.as_u32());
-                        state.heap.insert(obj, HeapState::MaybeFreed);
-                        state.points_to.insert(p, std::iter::once(obj).collect());
-                        state.owner_alias.remove(&p);
+            // Which argument's buffer (if any) does this call reallocate? Either a
+            // direct Vec/String realloc method (the receiver), or a callee
+            // summarised as `reallocs_param` (a wrapper like
+            // BitVec::into_boxed_slice → Vec::into_boxed_slice).
+            let realloc_recv: Option<Local> =
+                if callee.is_some_and(|id| is_reallocating_method(&tcx.def_path_str(id))) {
+                    args.first().and_then(|a| operand_local(&a.node))
+                } else if let Some(n) =
+                    callee.and_then(|id| summaries.get(&id)).and_then(|s| s.reallocs_param)
+                {
+                    crate::analysis::summary::nth_arg_local(args, n)
+                } else {
+                    None
+                };
+            if let Some(recv) = realloc_recv {
+                // The buffer owner is what the receiver aliases (a `&mut v`
+                // reborrow), or the receiver itself when it is the owner value
+                // (a by-value `self` passed to a wrapper).
+                let owners: Vec<Local> = {
+                    let aliased: Vec<Local> = state.owners_of(recv).collect();
+                    if aliased.is_empty() { vec![recv] } else { aliased }
+                };
+                // Record any *parameter* owner so this body itself gets a
+                // `reallocs_param` summary (propagating the effect up wrappers).
+                for &o in &owners {
+                    if is_param(body, o) {
+                        state.realloced_params.insert(o);
                     }
+                }
+                // Mark stale every handle aliasing the reallocated buffer, except
+                // reference (`&mut Vec`) handles — the collection itself stays
+                // valid; only pointers/handles into its buffer go stale. (Marking
+                // a `&mut` handle would let an opaque call's arg-escape corrupt
+                // the shared object.)
+                let stale: Vec<Local> = state
+                    .owner_alias
+                    .iter()
+                    .filter(|(p, set)| {
+                        owners.iter().any(|o| set.contains(o))
+                            && !matches!(body.local_decls[**p].ty.kind(), TyKind::Ref(..))
+                    })
+                    .map(|(p, _)| *p)
+                    .collect();
+                for p in stale {
+                    // Distinct object per stale pointer (namespaced away from
+                    // call-site and summary object ids) so they don't share state.
+                    let obj = ObjectId(REALLOC_BASE + p.as_u32());
+                    state.heap.insert(obj, HeapState::MaybeFreed);
+                    state.points_to.insert(p, std::iter::once(obj).collect());
+                    state.owner_alias.remove(&p);
                 }
             }
 
@@ -282,6 +307,7 @@ pub fn apply_terminator<'tcx>(
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
             } else if is_from_raw(&path) {
+                let mut reconstructed_from: Option<Local> = None;
                 if let Some(src) = first_arg_local(args) {
                     let objs: Vec<_> = state.objects_for(src).collect();
                     for id in objs {
@@ -291,9 +317,21 @@ pub fn apply_terminator<'tcx>(
                             state.heap.insert(id, HeapState::Reconstituted);
                         }
                     }
+                    reconstructed_from = Some(src);
                 }
                 state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
+                // The reconstructed container (e.g. the `Vec` from
+                // `Vec::from_raw_parts(ptr, ..)`) owns the same buffer the input
+                // pointer pointed into, so it aliases whatever that pointer did.
+                // This lets `BitVec::into_vec` be summarised as returning a value
+                // aliasing `self`'s buffer.
+                state.owner_alias.remove(&dest);
+                if let Some(src) = reconstructed_from {
+                    if let Some(owners) = state.owner_alias.get(&src).cloned() {
+                        state.owner_alias.insert(dest, owners);
+                    }
+                }
                 state.init.remove(&dest);
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
@@ -456,6 +494,12 @@ pub fn is_reference_param<'tcx>(body: &Body<'tcx>, local: Local) -> bool {
         && matches!(body.local_decls[local].ty.kind(), TyKind::Ref(..))
 }
 
+/// Is `local` any parameter (by-value or by-reference)?
+fn is_param<'tcx>(body: &Body<'tcx>, local: Local) -> bool {
+    let idx = local.as_usize();
+    idx >= 1 && idx <= body.arg_count
+}
+
 /// Break owner-aliases reachable through a call's arguments. An argument that
 /// is itself an owner (passed e.g. as `&mut self`), or that aliases an owner's
 /// interior (a reborrow handed to the callee), lets the callee reassign that
@@ -562,11 +606,18 @@ fn update_owner_alias<'tcx>(
     };
     let root = place.local;
     let has_deref = place.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+    let has_field = place.projection.iter().any(|e| matches!(e, ProjectionElem::Field(..)));
     let owners: std::collections::BTreeSet<Local> = if let Some(existing) = state.owner_alias.get(&root) {
         // Source is already owner-aliased — propagate through copy / field / deref.
         existing.clone()
     } else if has_deref && is_reference_param(body, root) {
         // Dereferencing a reference parameter yields a pointer into its interior.
+        std::iter::once(root).collect()
+    } else if has_field && is_param(body, root) {
+        // Reading a field of a by-value parameter (e.g. `let p = self.pointer`
+        // where `self` is taken by value): the field handle aliases the
+        // parameter's buffer. Harmless for non-pointer fields — detection only
+        // fires when such a handle later reaches a deref / from_raw.
         std::iter::once(root).collect()
     } else {
         std::collections::BTreeSet::new()
