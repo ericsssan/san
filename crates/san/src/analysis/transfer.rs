@@ -314,25 +314,6 @@ pub fn apply_terminator<'tcx>(
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
-            } else if is_ptr_arith_advancing(&path) {
-                // Propagate points_to from the base pointer (arg 0) through ptr arithmetic.
-                // The derived pointer is into the same allocation — inherit the tracking.
-                if let Some(base_local) = first_arg_local(args) {
-                    let objs: std::collections::BTreeSet<_> = state.objects_for(base_local).collect();
-                    if !objs.is_empty() {
-                        state.points_to.insert(dest, objs);
-                    } else {
-                        state.points_to.remove(&dest);
-                    }
-                } else {
-                    state.points_to.remove(&dest);
-                }
-                state.local_proto.remove(&dest);
-                state.init.remove(&dest);
-                state.buf_written.remove(&dest);
-                state.lt_facts.remove(&dest);
-                state.ge_facts.remove(&dest);
-                state.bounded.remove(&dest);
             } else if let Some(summary) = summaries.get(&def_id) {
                 // Known local function: apply its pre-computed interprocedural summary.
                 apply_fn_summary(state, body, args, dest, bb, summary);
@@ -576,15 +557,4 @@ pub fn is_buf_write(path: &str) -> bool {
 /// Returns `true` for `MaybeUninit::assume_init` and related consuming variants.
 pub fn is_maybe_uninit_assume_init(path: &str) -> bool {
     path.contains("MaybeUninit") && path.contains("assume_init")
-}
-
-/// Returns `true` for advancing pointer arithmetic that keeps the pointer in the same allocation.
-pub fn is_ptr_arith_advancing(path: &str) -> bool {
-    let is_ptr_type = path.contains("const_ptr") || path.contains("mut_ptr") || path.contains("NonNull");
-    if !is_ptr_type { return false; }
-    path.ends_with("::add") || path.ends_with("::sub") || path.ends_with("::offset")
-        || path.ends_with("::byte_add") || path.ends_with("::byte_sub") || path.ends_with("::byte_offset")
-        || path.ends_with("::wrapping_add") || path.ends_with("::wrapping_sub")
-        || path.ends_with("::wrapping_offset") || path.ends_with("::wrapping_byte_add")
-        || path.ends_with("::wrapping_byte_sub") || path.ends_with("::wrapping_byte_offset")
 }

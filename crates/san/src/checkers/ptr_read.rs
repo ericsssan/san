@@ -86,7 +86,7 @@ impl Checker for PtrRead {
                 continue;
             };
 
-            // Suppress if flow tracks this pointer as coming from a live into_raw (still valid)
+            // Suppress if flow proves this pointer came from a live into_raw (still valid).
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_local(args) {
                     if state.ptr_is_raw_owned(ptr_local) {

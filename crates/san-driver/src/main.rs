@@ -3,6 +3,7 @@
 extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate rustc_middle;
+extern crate rustc_span;
 
 use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface::Compiler;
@@ -24,9 +25,22 @@ impl Callbacks for SanCallbacks {
             san::debug_print_all_paths(tcx);
         }
         let findings = san::run_checks(tcx);
+        // Emit via span_warn for IDE / normal builds (workspace members).
+        // Also emit directly to stderr so findings are visible when cargo
+        // applies --cap-lints allow to dependency crates (RUSTC_WRAPPER mode).
+        let cap_lints = env::var_os("RUSTC_WORKSPACE_WRAPPER").is_none()
+            && env::var_os("RUSTC_WRAPPER").is_some();
         let dcx = tcx.dcx();
-        for f in findings {
-            dcx.span_warn(f.span, format!("[san::{}] {}", f.rule_id, f.message));
+        let sm = tcx.sess.source_map();
+        for f in &findings {
+            if cap_lints {
+                // span_warn is silenced for deps; print directly instead.
+                let loc = sm.span_to_diagnostic_string(f.span);
+                eprintln!("warning[san::{}]: {}", f.rule_id, f.message);
+                eprintln!("  --> {loc}");
+            } else {
+                dcx.span_warn(f.span, format!("[san::{}] {}", f.rule_id, f.message));
+            }
         }
         Compilation::Continue
     }
@@ -57,6 +71,18 @@ fn main() -> ExitCode {
     } else {
         orig_args
     };
+
+    // Cargo probes the wrapper with `san rustc -vV` to get version info.
+    // Passthrough directly to the real rustc for any non-compilation invocation.
+    let is_version_probe = args.iter().any(|a| a == "-vV" || a == "--version" || a == "-V");
+    let is_print_only = args.iter().any(|a| a.starts_with("--print=") || a == "--print");
+    if is_version_probe || is_print_only {
+        let status = std::process::Command::new(&args[0])
+            .args(&args[1..])
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run rustc: {e}"));
+        return if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
 
     let has_sysroot = args
         .iter()
