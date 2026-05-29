@@ -229,11 +229,16 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
         })
         .collect();
 
-    // Two-pass interprocedural summary computation.
-    // Pass 1 seeds with an empty map so every callee is treated as opaque.
-    // Pass 2 refines with the Pass 1 summaries, resolving one level of call depth.
+    // Interprocedural summary computation by chaotic iteration to a fixpoint.
+    // Each round recomputes every function's summary against the previous
+    // round's snapshot, so effects propagate one extra call level per round:
+    // round 1 resolves leaves, round 2 their callers, and so on. A deep
+    // consuming chain `a -> b -> c -> Box::from_raw` needs as many rounds as it
+    // is deep, which the fixed 2-pass scheme could not reach. We iterate until
+    // the summary map stops changing, capped to bound cost on large crates.
+    const MAX_SUMMARY_ROUNDS: usize = 8;
     let mut summaries = analysis::SummaryMap::new();
-    for _ in 0..2 {
+    for _ in 0..MAX_SUMMARY_ROUNDS {
         let snap = summaries.clone();
         for &def_id in &local_fns {
             let body = tcx.optimized_mir(def_id);
@@ -241,7 +246,12 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
             let s = analysis::summary::extract_summary(body, &flow);
             if !s.param_effects.is_empty() || s.returns_raw_owned {
                 summaries.insert(def_id, s);
+            } else {
+                summaries.remove(&def_id);
             }
+        }
+        if summaries == snap {
+            break;
         }
     }
 

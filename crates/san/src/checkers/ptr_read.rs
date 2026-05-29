@@ -19,6 +19,7 @@
 /// RustSec: appears in RUSTSEC-2020-0146 (heapsize), custom Vec implementations,
 /// and every crate that hand-rolls MaybeUninit-based collections.
 use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -86,9 +87,25 @@ impl Checker for PtrRead {
                 continue;
             };
 
-            // Suppress if flow proves this pointer came from a live into_raw (still valid).
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_local(args) {
+                    // Reading through a pointer whose allocation was already
+                    // handed off (reconstituted by a `from_raw`/consuming call,
+                    // possibly in another function via its summary) is a
+                    // use-after-free — a real bug, not just an audit flag.
+                    match state.freed_kind(ptr_local) {
+                        crate::analysis::state::FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        crate::analysis::state::FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        crate::analysis::state::FreedKind::NotFreed => {}
+                    }
+                    // Suppress if flow proves this pointer came from a live
+                    // into_raw and has not been freed (still valid).
                     if state.ptr_is_raw_owned(ptr_local) {
                         continue;
                     }

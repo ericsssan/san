@@ -17,6 +17,7 @@
 ///
 /// Seen across: RUSTSEC-2020-0071 (bumpalo), custom allocators, FFI buffers.
 use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -154,9 +155,22 @@ impl Checker for PtrWrite {
                 continue;
             };
 
-            // Suppress if flow tracks this pointer as coming from a live into_raw (still valid)
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_local(args) {
+                    // Writing through a pointer whose allocation was already
+                    // handed off is a use-after-free (see ptr_read for rationale).
+                    match state.freed_kind(ptr_local) {
+                        crate::analysis::state::FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "write", false));
+                            continue;
+                        }
+                        crate::analysis::state::FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "write", true));
+                            continue;
+                        }
+                        crate::analysis::state::FreedKind::NotFreed => {}
+                    }
+                    // Suppress if flow proves this pointer is still a live into_raw.
                     if state.ptr_is_raw_owned(ptr_local) {
                         continue;
                     }

@@ -27,6 +27,9 @@
 ///
 /// Seen in: intrusive linked lists, custom allocators, FFI buffers, and every
 /// hand-rolled data structure that stores `*mut T` node pointers.
+use crate::analysis::state::FreedKind;
+use crate::analysis::FlowResults;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::visit::{PlaceContext, Visitor};
 use rustc_middle::mir::{
@@ -40,6 +43,7 @@ pub struct RawPtrDeref;
 struct DerefVisitor<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &'a Body<'tcx>,
+    flow: &'a FlowResults,
     /// Locals assigned exactly once by an `Assign` to a bare local, mapped to
     /// the assigned rvalue. Used to trace a pointer back to its origin.
     defs: HashMap<Local, &'a Rvalue<'tcx>>,
@@ -123,6 +127,28 @@ impl<'a, 'tcx> Visitor<'tcx> for DerefVisitor<'a, 'tcx> {
             }
 
             let access = if context.is_mutating_use() { "write" } else { "read" };
+
+            // If flow shows the deref'd pointer's allocation was already handed
+            // off (reconstituted — possibly by a consuming call in another
+            // function), this is a use-after-free, not a generic raw deref.
+            // Only check direct local derefs (`*p`), where the object is tracked
+            // on the base local itself.
+            if base.projection.is_empty() {
+                if let Some(state) = self.flow.state_at_location(self.tcx, self.body, location) {
+                    match state.freed_kind(base.local) {
+                        FreedKind::Definite => {
+                            self.findings.push(uaf_finding(span, access, false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            self.findings.push(uaf_finding(span, access, true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+            }
+
             self.findings.push(Finding {
                 rule_id: "raw_ptr_deref",
                 severity: Severity::Warning,
@@ -143,7 +169,7 @@ impl Checker for RawPtrDeref {
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,
-        _flow: &crate::analysis::FlowResults,
+        flow: &crate::analysis::FlowResults,
     ) -> Vec<Finding> {
         // Build the single-assignment map: a local assigned more than once is
         // ambiguous, so drop it from the map (we only trust unique definitions).
@@ -168,6 +194,7 @@ impl Checker for RawPtrDeref {
         let mut visitor = DerefVisitor {
             tcx,
             body,
+            flow,
             defs,
             findings: Vec::new(),
         };

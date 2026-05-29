@@ -29,6 +29,7 @@ pub mod ptr_read;
 pub mod ptr_write;
 pub mod raw_allocator;
 pub mod raw_ptr_deref;
+pub mod uaf;
 pub mod raw_fd;
 pub mod slice_align_to;
 pub mod slice_from_raw_parts;
