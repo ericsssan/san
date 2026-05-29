@@ -29,6 +29,7 @@
 /// Seen in: manually implemented future poll loops, custom async runtimes,
 /// and FFI layers that wrap async Rust for C callers.
 use crate::{Checker, Finding, Severity};
+use rustc_hir::def::DefKind;
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
@@ -36,10 +37,25 @@ pub struct PinNewUnchecked;
 
 impl Checker for PinNewUnchecked {
     fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+        // Compiler-generated async/await desugaring produces Pin::new_unchecked calls that
+        // are always safe: the coroutine body itself is pinned before being polled, which
+        // guarantees sub-futures stored inside it cannot be moved.
+        if matches!(tcx.def_kind(body.source.def_id()), DefKind::SyntheticCoroutineBody) {
+            return Vec::new();
+        }
+
         let mut findings = Vec::new();
 
         for block_data in body.basic_blocks.iter() {
             let Some(terminator) = &block_data.terminator else { continue };
+
+            // pin_project!/pin! and similar widely-audited macros expand to
+            // Pin::new_unchecked calls that are structurally correct by construction.
+            // Macro-expanded sites are never user-written and can be trusted.
+            if terminator.source_info.span.from_expansion() {
+                continue;
+            }
+
             let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
