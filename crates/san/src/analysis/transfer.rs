@@ -10,6 +10,10 @@ use crate::analysis::state::BlockState;
 use crate::analysis::summary::{apply_fn_summary, SummaryMap};
 use crate::analysis::typestate::{ProtocolId, ProtocolState};
 
+/// Object-id namespace for pointers invalidated by a reallocation, kept clear of
+/// call-site ids (small `bb.index()` values) and summary ids (`SUMMARY_BASE`).
+const REALLOC_BASE: u32 = 0x4000_0000;
+
 pub fn apply_statement<'tcx>(
     state: &mut BlockState,
     _tcx: TyCtxt<'tcx>,
@@ -202,6 +206,41 @@ pub fn apply_terminator<'tcx>(
             let callee = func.const_fn_def().map(|(id, _)| id).or_else(|| {
                 operand_local(func).and_then(|l| state.fn_ptr_targets.get(&l).copied())
             });
+            // Reallocation invalidates outstanding pointers into the buffer:
+            // `let p = self.v.as_mut_ptr(); self.v.push(x); use(p)`. When a
+            // reallocating method is called on an owner, every pointer currently
+            // aliasing that owner is marked stale (MaybeFreed — realloc is
+            // capacity-conditional), so a later use is flagged as a potential
+            // use-after-free. Done BEFORE invalidate_owner_args, which would
+            // otherwise drop the aliases on the `&mut` receiver.
+            if callee.is_some_and(|id| is_reallocating_method(&tcx.def_path_str(id))) {
+                if let Some(recv) = args.first().and_then(|a| operand_local(&a.node)) {
+                    let owners: Vec<Local> = state.owners_of(recv).collect();
+                    // Only raw-pointer locals are invalidated by a realloc: a
+                    // `*mut`/`*const` taken into the buffer goes stale. A `&mut Vec`
+                    // reference that merely aliases the owner is NOT stale (the Vec
+                    // itself remains valid) and must not be marked, or an opaque
+                    // call's arg-escape would corrupt the shared state.
+                    let stale: Vec<Local> = state
+                        .owner_alias
+                        .iter()
+                        .filter(|(p, set)| {
+                            owners.iter().any(|o| set.contains(o))
+                                && matches!(body.local_decls[**p].ty.kind(), TyKind::RawPtr(..))
+                        })
+                        .map(|(p, _)| *p)
+                        .collect();
+                    for p in stale {
+                        // Distinct object per stale pointer (namespaced away from
+                        // call-site and summary object ids) so they don't share state.
+                        let obj = ObjectId(REALLOC_BASE + p.as_u32());
+                        state.heap.insert(obj, HeapState::MaybeFreed);
+                        state.points_to.insert(p, std::iter::once(obj).collect());
+                        state.owner_alias.remove(&p);
+                    }
+                }
+            }
+
             // An accessor that *returns* a pointer into a parameter does not
             // reassign that parameter, so passing it by `&mut` must not break the
             // alias — skip invalidation for that argument.
@@ -458,6 +497,30 @@ fn invalidate_owner_args<'tcx>(
 /// owner's field (a `*mut` value passed by value cannot).
 fn is_mutable_ref_ty<'tcx>(ty: rustc_middle::ty::Ty<'tcx>) -> bool {
     matches!(ty.kind(), TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut))
+}
+
+/// `Vec`/`String` methods that may reallocate (and thus move) the backing
+/// buffer, invalidating any raw pointer previously taken into it. Restricted to
+/// Vec/String so unrelated `push`/`insert` (e.g. on maps) are not matched.
+pub fn is_reallocating_method(path: &str) -> bool {
+    let on_buffer = path.contains("vec::Vec") || path.contains("string::String");
+    if !on_buffer {
+        return false;
+    }
+    path.ends_with("::reserve")
+        || path.ends_with("::reserve_exact")
+        || path.ends_with("::try_reserve")
+        || path.ends_with("::try_reserve_exact")
+        || path.ends_with("::shrink_to_fit")
+        || path.ends_with("::shrink_to")
+        || path.ends_with("::into_boxed_slice")
+        || path.ends_with("::push")
+        || path.ends_with("::push_str")
+        || path.ends_with("::insert")
+        || path.ends_with("::append")
+        || path.ends_with("::extend_from_slice")
+        || path.ends_with("::resize")
+        || path.ends_with("::resize_with")
 }
 
 /// Recompute `owner_alias[dst]` from the assigned rvalue. A pointer aliases an
