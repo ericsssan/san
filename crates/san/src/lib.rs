@@ -258,5 +258,17 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
         }
     }
 
+    // Deduplicate by (rule_id, source position). A single source location is
+    // frequently reached by many MIR bodies — e.g. a `get_unchecked_mut` inside
+    // a `macro_rules!` body is one source span shared by every macro expansion,
+    // and generic helpers are analyzed once per monomorphization. We key on the
+    // span's byte range rather than the `Span` itself because each macro
+    // expansion carries a distinct `SyntaxContext`: the spans render to the same
+    // file:line:col but compare unequal. Byte positions are global within the
+    // crate's source map, so (lo, hi) identifies a unique source location.
+    // Collapsing duplicates removes no distinct finding — no false-negative risk.
+    let mut seen = std::collections::HashSet::new();
+    findings.retain(|f| seen.insert((f.rule_id, f.span.lo(), f.span.hi())));
+
     findings
 }
