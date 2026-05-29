@@ -1,13 +1,17 @@
-/// Detects calls to `mem::forget` and `ManuallyDrop::new`.
+/// Detects calls to `mem::forget`.
 ///
 /// `mem::forget(val)` prevents `val`'s destructor from running. While safe
 /// in Rust (leaking is always allowed), in unsafe code it creates a critical
 /// invariant: callers must ensure no other path can drop the same data.
 ///
-/// `ManuallyDrop::new(val)` is the explicit alternative — the wrapped value
-/// will not be dropped unless `ManuallyDrop::drop` (unsafe) is called explicitly.
+/// `ManuallyDrop::new` is intentionally NOT flagged here: it is a safe
+/// constructor (like `Box::new`) whose only effect is to suppress the inner
+/// value's automatic drop — a leak concern, never UB on its own. The genuinely
+/// unsafe siblings `ManuallyDrop::drop` and `ManuallyDrop::take` (the
+/// double-drop / use-after-move hazards) are covered by the `manually_drop`
+/// checker, so flagging `new` here would only add noise.
 ///
-/// Common unsafe patterns involving `mem::forget` / `ManuallyDrop::new`:
+/// Common unsafe patterns involving `mem::forget`:
 ///   • "Split ownership" — create raw pointer to fields, forget the container,
 ///     then manage each field independently. A panic between the pointer
 ///     creation and the `forget` causes the container to be dropped with the
@@ -19,7 +23,7 @@
 ///     `mem::forget` surrenders Rust's ownership. Forgetting without the FFI
 ///     call also happening (e.g. due to early return) causes a memory leak.
 ///
-/// Review all `mem::forget` / `ManuallyDrop::new` call sites to ensure:
+/// Review all `mem::forget` call sites to ensure:
 ///   1. No panic path exists between taking raw pointers and calling `forget`
 ///   2. The forgetting is paired with a corresponding ownership pickup elsewhere
 use crate::{Checker, Finding, Severity};
@@ -43,13 +47,6 @@ impl Checker for MemForget {
                     "mem::forget",
                     "verify no panic path exists between taking raw pointers to the \
                      forgotten value and this call; ownership must be picked up elsewhere",
-                )
-            } else if path.ends_with("ManuallyDrop::<T>::new") || path.ends_with("ManuallyDrop::new") {
-                (
-                    "ManuallyDrop::new",
-                    "destructor will not run automatically; must call ManuallyDrop::drop \
-                     (unsafe) to clean up, or ensure ownership is transferred elsewhere; \
-                     dropping the ManuallyDrop wrapper does NOT drop the inner value",
                 )
             } else {
                 continue;
