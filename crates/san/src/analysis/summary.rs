@@ -33,6 +33,12 @@ pub struct FnSummary {
     /// `true` when the return value is a freshly-owned raw pointer created inside
     /// this function (i.e. the function calls `into_raw` and returns that pointer).
     pub returns_raw_owned: bool,
+    /// `Some(n)` when the function returns a pointer that aliases the *interior*
+    /// of parameter `n` (e.g. an accessor like `triple_mut`/`as_mut_ptr` handing
+    /// back the receiver's owned buffer). The caller's destination then aliases
+    /// whatever it passed for parameter `n`, so freeing it would leave that
+    /// argument dangling.
+    pub returns_alias_of_param: Option<usize>,
 }
 
 /// Maps local DefIds to their pre-computed summaries.
@@ -66,24 +72,31 @@ pub fn summary_initial_state<'tcx>(body: &Body<'tcx>) -> BlockState {
 
 /// Derive a `FnSummary` by inspecting the fixpoint `FlowResults` of a
 /// function body that was analysed with `summary_initial_state` as the seed.
-pub fn extract_summary<'tcx>(body: &Body<'tcx>, flow: &FlowResults) -> FnSummary {
-    // Collect the entry states of all Return basic blocks and join them.
+pub fn extract_summary<'tcx>(
+    tcx: rustc_middle::ty::TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    flow: &FlowResults,
+) -> FnSummary {
+    // Collect the states at all Return terminators and join them. We replay each
+    // return block's statements (not just its entry state) so effects written by
+    // those statements — e.g. `_0 = &mut self.field` in a single-block accessor —
+    // are reflected in the summary.
     let mut joined: Option<BlockState> = None;
     for (bb, block_data) in body.basic_blocks.iter_enumerated() {
         let Some(term) = &block_data.terminator else { continue };
         if !matches!(term.kind, rustc_middle::mir::TerminatorKind::Return) {
             continue;
         }
-        if let Some(state) = flow.state_at(bb) {
+        if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
             joined = Some(match joined {
-                None => state.clone(),
-                Some(existing) => existing.join_with(state).0,
+                None => state,
+                Some(existing) => existing.join_with(&state).0,
             });
         }
     }
 
     let Some(exit_state) = joined else {
-        return FnSummary { param_effects: vec![], returns_raw_owned: false };
+        return FnSummary { param_effects: vec![], returns_raw_owned: false, returns_alias_of_param: None };
     };
 
     // Determine per-parameter effects.
@@ -108,7 +121,14 @@ pub fn extract_summary<'tcx>(body: &Body<'tcx>, flow: &FlowResults) -> FnSummary
         .objects_for(return_local)
         .any(|id| id.0 < SUMMARY_BASE && matches!(exit_state.heap.get(&id), Some(HeapState::RawOwned)));
 
-    FnSummary { param_effects, returns_raw_owned }
+    // If the return value aliases the interior of a parameter, record which one.
+    // Owner locals are parameter locals 1..=arg_count; param index = local - 1.
+    let returns_alias_of_param = exit_state.owners_of(return_local).find_map(|owner| {
+        let k = owner.as_usize();
+        (k >= 1 && k <= body.arg_count).then(|| k - 1)
+    });
+
+    FnSummary { param_effects, returns_raw_owned, returns_alias_of_param }
 }
 
 // ── apply_fn_summary ──────────────────────────────────────────────────────────
@@ -123,7 +143,7 @@ pub fn extract_summary<'tcx>(body: &Body<'tcx>, flow: &FlowResults) -> FnSummary
 ///   `call_bb`; otherwise clear `dest`.
 pub fn apply_fn_summary<'tcx>(
     state: &mut BlockState,
-    _body: &Body<'tcx>,
+    body: &Body<'tcx>,
     args: &[rustc_span::Spanned<Operand<'tcx>>],
     dest: Local,
     call_bb: BasicBlock,
@@ -163,13 +183,35 @@ pub fn apply_fn_summary<'tcx>(
         state.points_to.remove(&dest);
         state.local_proto.remove(&dest);
     }
+
+    // If the callee hands back a pointer into one of its parameters, the
+    // destination aliases the same owner the argument did. The argument counts
+    // as a persistent owner only if it is itself a reference parameter or
+    // already aliases one — a by-value local (e.g. `into_vec(self)`, which then
+    // `mem::forget`s `self`) is consumed, not a persistent owner, so freeing
+    // through it is not a use-after-free.
+    state.owner_alias.remove(&dest);
+    if let Some(n) = summary.returns_alias_of_param {
+        if let Some(arg) = nth_arg_local(args, n) {
+            let owners: Vec<Local> = if let Some(set) = state.owner_alias.get(&arg) {
+                set.iter().copied().collect()
+            } else if crate::analysis::transfer::is_reference_param(body, arg) {
+                vec![arg]
+            } else {
+                Vec::new()
+            };
+            for owner in owners {
+                state.set_owner_alias(dest, owner);
+            }
+        }
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Extract the plain `Local` at argument position `idx` (0-based), requiring
 /// no projections (like `first_arg_local` but for arbitrary positions).
-fn nth_arg_local<'tcx>(
+pub fn nth_arg_local<'tcx>(
     args: &[rustc_span::Spanned<Operand<'tcx>>],
     idx: usize,
 ) -> Option<Local> {

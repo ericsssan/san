@@ -1,6 +1,6 @@
 use rustc_middle::mir::{
-    BasicBlock, BinOp, Body, Local, Operand, Rvalue, Statement, StatementKind, Terminator,
-    TerminatorKind,
+    BasicBlock, BinOp, Body, Local, Operand, ProjectionElem, Rvalue, Statement, StatementKind,
+    Terminator, TerminatorKind,
 };
 use rustc_middle::ty::{TyCtxt, TyKind};
 
@@ -12,11 +12,18 @@ use crate::analysis::typestate::{ProtocolId, ProtocolState};
 pub fn apply_statement<'tcx>(
     state: &mut BlockState,
     _tcx: TyCtxt<'tcx>,
-    _body: &Body<'tcx>,
+    body: &Body<'tcx>,
     stmt: &Statement<'tcx>,
 ) {
     let StatementKind::Assign(assign) = &stmt.kind else { return };
     let (dst, rvalue) = &**assign;
+
+    // Any write to (a projection rooted at) a local breaks owner-aliases to it:
+    // the field the alias referred to may have just been reassigned. This is the
+    // path-sensitive guard that keeps the *correct* realloc path (which stores a
+    // fresh buffer into `self.data` before freeing the old one) from being
+    // flagged, while the buggy fall-through path (no such store) stays flagged.
+    state.invalidate_owner(dst.local);
 
     // Store into projection (field/deref) → escape any tracked source local.
     if !dst.projection.is_empty() {
@@ -27,6 +34,7 @@ pub fn apply_statement<'tcx>(
     }
 
     let dst_local = dst.local;
+    update_owner_alias(state, body, dst_local, rvalue);
 
     match rvalue {
         // Rvalue::Use gained a second field (WithRetag) in this nightly.
@@ -187,6 +195,15 @@ pub fn apply_terminator<'tcx>(
 ) {
     match &term.kind {
         TerminatorKind::Call { func, args, destination, .. } => {
+            // A call may reach (and reassign a field of) any owner passed to it
+            // by MUTABLE reference — conservatively break those aliases so a
+            // later free isn't flagged on the strength of a now-stale alias.
+            // Shared (`&`) borrows can't reassign the field, so they preserve it.
+            invalidate_owner_args(state, body, args);
+            // The destination is being redefined by the call.
+            state.invalidate_owner(destination.local);
+            state.owner_alias.remove(&destination.local);
+
             let Some((def_id, _)) = func.const_fn_def() else {
                 escape_raw_ptr_args(state, body, args);
                 return;
@@ -375,6 +392,108 @@ pub fn apply_terminator<'tcx>(
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// Is `local` a reference-typed parameter (`&self` / `&mut self`-style)? Such
+/// parameters are the "owners" whose interior a returned pointer may alias.
+/// By-value (owned) params are excluded — those are the consume pattern.
+pub fn is_reference_param<'tcx>(body: &Body<'tcx>, local: Local) -> bool {
+    let idx = local.as_usize();
+    idx >= 1
+        && idx <= body.arg_count
+        && matches!(body.local_decls[local].ty.kind(), TyKind::Ref(..))
+}
+
+/// Break owner-aliases reachable through a call's arguments. An argument that
+/// is itself an owner (passed e.g. as `&mut self`), or that aliases an owner's
+/// interior (a reborrow handed to the callee), lets the callee reassign that
+/// owner's field — so any alias to it is conservatively dropped.
+fn invalidate_owner_args<'tcx>(
+    state: &mut BlockState,
+    body: &Body<'tcx>,
+    args: &[rustc_span::Spanned<Operand<'tcx>>],
+) {
+    let live_owners: std::collections::BTreeSet<Local> =
+        state.owner_alias.values().flat_map(|s| s.iter().copied()).collect();
+    let mut to_invalidate = std::collections::BTreeSet::new();
+    for arg in args {
+        if let Operand::Move(p) | Operand::Copy(p) = &arg.node {
+            // Only a mutable reference / `*mut` argument can reassign the owner's
+            // field; a shared borrow leaves it intact and must not break aliases.
+            if !is_mutable_ref_ty(body.local_decls[p.local].ty) {
+                continue;
+            }
+            let l = p.local;
+            to_invalidate.extend(state.owners_of(l));
+            if live_owners.contains(&l) {
+                to_invalidate.insert(l);
+            }
+        }
+    }
+    for o in to_invalidate {
+        state.invalidate_owner(o);
+    }
+}
+
+/// `&mut T` — the only argument shape through which a callee can reassign the
+/// owner's field (a `*mut` value passed by value cannot).
+fn is_mutable_ref_ty<'tcx>(ty: rustc_middle::ty::Ty<'tcx>) -> bool {
+    matches!(ty.kind(), TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut))
+}
+
+/// Recompute `owner_alias[dst]` from the assigned rvalue. A pointer aliases an
+/// owner's interior when it is loaded by dereferencing a reference-typed
+/// parameter (or a value already known to alias one), and that provenance
+/// propagates through copies, casts, field projections and aggregates.
+fn update_owner_alias<'tcx>(
+    state: &mut BlockState,
+    body: &Body<'tcx>,
+    dst: Local,
+    rvalue: &Rvalue<'tcx>,
+) {
+    // Aggregate (e.g. building the `(ptr, len, cap)` tuple): union operand owners.
+    if let Rvalue::Aggregate(_, operands) = rvalue {
+        let mut owners = std::collections::BTreeSet::new();
+        for op in operands.iter() {
+            if let Some(l) = operand_local(op) {
+                owners.extend(state.owners_of(l));
+            }
+        }
+        if owners.is_empty() {
+            state.owner_alias.remove(&dst);
+        } else {
+            state.owner_alias.insert(dst, owners);
+        }
+        return;
+    }
+
+    let place = match rvalue {
+        Rvalue::Use(Operand::Copy(p) | Operand::Move(p), _) => Some(p),
+        Rvalue::Ref(_, _, p) => Some(p),
+        Rvalue::RawPtr(_, p) => Some(p),
+        Rvalue::Cast(_, Operand::Copy(p) | Operand::Move(p), _) => Some(p),
+        _ => None,
+    };
+    let Some(place) = place else {
+        state.owner_alias.remove(&dst);
+        return;
+    };
+    let root = place.local;
+    let has_deref = place.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+    let owners: std::collections::BTreeSet<Local> = if let Some(existing) = state.owner_alias.get(&root) {
+        // Source is already owner-aliased — propagate through copy / field / deref.
+        existing.clone()
+    } else if has_deref && is_reference_param(body, root) {
+        // Dereferencing a reference parameter yields a pointer into its interior.
+        std::iter::once(root).collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    if owners.is_empty() {
+        state.owner_alias.remove(&dst);
+    } else {
+        state.owner_alias.insert(dst, owners);
+    }
+}
 
 fn rvalue_local<'tcx>(rvalue: &Rvalue<'tcx>) -> Option<Local> {
     match rvalue {
