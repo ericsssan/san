@@ -216,11 +216,14 @@ pub fn debug_print_all_paths(tcx: TyCtxt<'_>) {
 pub fn is_owned_buffer_accessor(path: &str) -> bool {
     let buffer_accessor = (path.ends_with("::as_mut_ptr") || path.ends_with("::as_ptr"))
         && (path.contains("vec::Vec") || path.contains("[T]") || path.contains("string::String"));
+    // `ends_with` suffices for most methods, but `::cast` may appear as
+    // `::cast::<U>` when the generic argument is explicit in the MIR path.
+    // Use `contains("::cast")` so both forms match.
     let nonnull_transform = path.contains("NonNull")
         && (path.ends_with("::as_ptr")
             || path.ends_with("::new_unchecked")
             || path.ends_with("::new")
-            || path.ends_with("::cast")
+            || path.contains("::cast")
             || path.ends_with("::as_mut")
             || path.ends_with("::as_ref"));
     let raw_ptr_transform = (path.contains("const_ptr") || path.contains("mut_ptr"))
@@ -230,7 +233,7 @@ pub fn is_owned_buffer_accessor(path: &str) -> bool {
             || path.ends_with("::wrapping_offset")
             || path.ends_with("::wrapping_add")
             || path.ends_with("::wrapping_sub")
-            || path.ends_with("::cast"));
+            || path.contains("::cast"));
     let slice_build = path.ends_with("slice::from_raw_parts")
         || path.ends_with("slice::from_raw_parts_mut");
     buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build
@@ -328,17 +331,32 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
             if !def_id.is_local() {
                 s.param_effects.clear();
                 s.returns_raw_owned = false;
+                let path = tcx.def_path_str(def_id);
                 // Curated knowledge for std's owned-buffer accessors, whose real
                 // provenance chain (Vec -> RawVec -> Unique -> NonNull) is deeper
                 // than the summary depth cap: they return a pointer into `self`'s
                 // owned allocation, so the result aliases parameter 0.
-                if is_owned_buffer_accessor(&tcx.def_path_str(def_id)) {
+                if is_owned_buffer_accessor(&path) {
                     s.returns_alias_of_param = Some(0);
+                }
+                // Only preserve `returns_ptr_of_param` for pointer-cast operations
+                // (ptr::cast, NonNull::cast). Pointer-arithmetic operations like
+                // ptr::sub/add stabilise cross-crate summaries in unexpected ways —
+                // specifically, they keep wrapper functions' Reconstituted effects
+                // alive across chaotic-iteration rounds, causing false owner-aliased-
+                // free positives in correct code (e.g. bytes::rebuild_vec).
+                let is_ptr_cast = path.contains("::cast")
+                    && (path.contains("const_ptr")
+                        || path.contains("mut_ptr")
+                        || path.contains("NonNull"));
+                if !is_ptr_cast {
+                    s.returns_ptr_of_param = None;
                 }
             }
             if !s.param_effects.is_empty()
                 || s.returns_raw_owned
                 || s.returns_alias_of_param.is_some()
+                || s.returns_ptr_of_param.is_some()
                 || s.reallocs_param.is_some()
             {
                 summaries.insert(def_id, s);

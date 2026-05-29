@@ -37,8 +37,16 @@ pub struct FnSummary {
     /// of parameter `n` (e.g. an accessor like `triple_mut`/`as_mut_ptr` handing
     /// back the receiver's owned buffer). The caller's destination then aliases
     /// whatever it passed for parameter `n`, so freeing it would leave that
-    /// argument dangling.
+    /// argument dangling. Detected via `owner_alias` — the return value's alias
+    /// set contains a reference-typed parameter.
     pub returns_alias_of_param: Option<usize>,
+    /// `Some(n)` when the function threads a raw-pointer parameter through to its
+    /// return value (e.g. `ptr::cast`, `ptr::add`, `NonNull::cast`). The return
+    /// pointer points into the same allocation as parameter `n`, so raw-ownership
+    /// tracking (`points_to` / heap state) must flow to the destination. Unlike
+    /// `returns_alias_of_param`, this does NOT propagate `owner_alias` — the
+    /// function is pure pointer arithmetic, not an interior-reference accessor.
+    pub returns_ptr_of_param: Option<usize>,
     /// `Some(n)` when the function reallocates the backing buffer of parameter
     /// `n` (a Vec/String realloc somewhere inside, possibly via a wrapper like
     /// `BitVec::into_boxed_slice`). Any pointer the caller holds into that
@@ -105,6 +113,7 @@ pub fn extract_summary<'tcx>(
             param_effects: vec![],
             returns_raw_owned: false,
             returns_alias_of_param: None,
+            returns_ptr_of_param: None,
             reallocs_param: None,
         };
     };
@@ -131,23 +140,35 @@ pub fn extract_summary<'tcx>(
         .objects_for(return_local)
         .any(|id| id.0 < SUMMARY_BASE && matches!(exit_state.heap.get(&id), Some(HeapState::RawOwned)));
 
-    // If the return value aliases the interior of a parameter, record which one.
-    // Two detection paths:
-    // 1. Via owner_alias: the return local's alias set contains a reference parameter.
-    // 2. Via points_to: the return local points to an object whose ID matches a raw
-    //    pointer parameter local (e.g. ptr::add returns a pointer derived from param 0).
-    //    Such objects have ObjectId(local.as_u32()) where local is 1..=arg_count.
+    // If the return value aliases the interior of a reference-param owner, record it.
+    // Detected via owner_alias: the return local's alias set contains a parameter local
+    // that is a reference type (e.g. `as_mut_ptr(&mut self)` hands back self's buffer).
     let returns_alias_of_param = exit_state.owners_of(return_local).find_map(|owner| {
         let k = owner.as_usize();
         (k >= 1 && k <= body.arg_count).then(|| k - 1)
-    }).or_else(|| {
-        // Check whether the return value traces back to a raw-pointer parameter's
-        // initial object. ptr::add/sub/offset all have this shape.
-        exit_state.objects_for(return_local).find_map(|id| {
-            let k = id.0 as usize;
-            (k >= 1 && k <= body.arg_count && id.0 < SUMMARY_BASE).then(|| k - 1)
-        })
     });
+
+    // If the return value is a raw pointer derived from a raw-pointer parameter
+    // (provenance-preserving: ptr::cast, ptr::add, NonNull::cast, etc.), record it.
+    // Propagates `points_to` at call sites so ownership tracking threads through.
+    // Does NOT propagate `owner_alias` — this is pointer arithmetic, not an accessor.
+    let returns_ptr_of_param = if returns_alias_of_param.is_none() {
+        // Only detect the raw-ptr-pass-through case when there is no owner_alias match,
+        // to avoid double-counting functions that are both an accessor and a pointer op.
+        exit_state.objects_for(return_local).find_map(|id| {
+            if id.0 >= SUMMARY_BASE {
+                // Object was seeded by summary_initial_state for a raw-pointer param.
+                let param_idx = (id.0 - SUMMARY_BASE) as usize;
+                (param_idx < body.arg_count).then_some(param_idx)
+            } else {
+                // Legacy path: ObjectId matching a param-local index (rarely used).
+                let k = id.0 as usize;
+                (k >= 1 && k <= body.arg_count).then(|| k - 1)
+            }
+        })
+    } else {
+        None
+    };
 
     // A parameter whose buffer was reallocated anywhere in the body (tracked in
     // `realloced_params`) yields a `reallocs_param` effect — propagated up
@@ -157,7 +178,7 @@ pub fn extract_summary<'tcx>(
         (k >= 1 && k <= body.arg_count).then(|| k - 1)
     });
 
-    FnSummary { param_effects, returns_raw_owned, returns_alias_of_param, reallocs_param }
+    FnSummary { param_effects, returns_raw_owned, returns_alias_of_param, returns_ptr_of_param, reallocs_param }
 }
 
 // ── apply_fn_summary ──────────────────────────────────────────────────────────
@@ -231,6 +252,19 @@ pub fn apply_fn_summary<'tcx>(
             };
             for owner in owners {
                 state.set_owner_alias(dest, owner);
+            }
+        }
+    }
+    // If the callee threads a raw-pointer parameter through to its return value
+    // (ptr::cast, ptr::add, NonNull::cast, etc.), propagate points_to so that
+    // ownership tracking survives across the call. Does NOT touch owner_alias
+    // — these are pure pointer-arithmetic functions, not interior-reference accessors.
+    if let Some(n) = summary.returns_ptr_of_param {
+        if let Some(arg) = nth_arg_local(args, n) {
+            if let Some(objs) = state.points_to.get(&arg).cloned() {
+                if !objs.is_empty() {
+                    state.points_to.insert(dest, objs);
+                }
             }
         }
     }
