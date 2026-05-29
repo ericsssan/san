@@ -134,10 +134,47 @@ pub fn apply_statement<'tcx>(
                 state.bounded.remove(&dst_local);
             }
         }
+        // Pointer-identity casts (PtrToPtr, Transmute) preserve the allocation
+        // the pointer refers into — dst points to the same objects as src. This
+        // matters for stale-pointer detection: after a realloc, a *mut T → *const T
+        // cast of the stale pointer must still carry the MaybeFreed state.
+        Rvalue::Cast(
+            CastKind::PtrToPtr | CastKind::Transmute,
+            Operand::Copy(src) | Operand::Move(src),
+            _,
+        ) if src.projection.is_empty() => {
+            let src_local = src.local;
+            if let Some(objs) = state.points_to.get(&src_local).cloned() {
+                state.points_to.insert(dst_local, objs);
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            // Clear other non-pointer facts.
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
         Rvalue::BinaryOp(op, operands) => {
             let (op1, _op2) = operands.as_ref();
-            // Clear any tracked special state for dst.
-            state.points_to.remove(&dst_local);
+            // For Offset/Add/Sub, the result points into the same allocation as the
+            // source pointer — propagate the stale/freed state of the pointer operand.
+            if matches!(op, BinOp::Offset | BinOp::Add | BinOp::Sub) {
+                let ptr_objs = [operands.0.place(), operands.1.place()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p.projection.is_empty())
+                    .find_map(|p| state.points_to.get(&p.local).cloned());
+                if let Some(objs) = ptr_objs {
+                    state.points_to.insert(dst_local, objs);
+                } else {
+                    state.points_to.remove(&dst_local);
+                }
+            } else {
+                state.points_to.remove(&dst_local);
+            }
             state.local_proto.remove(&dst_local);
             state.init.remove(&dst_local);
             state.buf_written.remove(&dst_local);
@@ -431,9 +468,30 @@ pub fn apply_terminator<'tcx>(
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
             } else {
-                // Unrecognized call: escape any tracked raw-pointer args, clear dest.
-                escape_raw_ptr_args(state, body, args);
-                state.points_to.remove(&dest);
+                // Unrecognized call: for known pointer-arithmetic / provenance-preserving
+                // functions (ptr::add, ptr::sub, ptr::offset, NonNull transforms), propagate
+                // the owner_alias from arg 0 to dest instead of escaping. These functions
+                // have `is_owned_buffer_accessor = true` but their MIR may not be available
+                // to compute a proper summary, causing the normal path to fail.
+                if crate::is_owned_buffer_accessor(&path) {
+                    if let Some(arg0) = first_arg_local(args) {
+                        // Propagate owner_alias (for stale-detection) and points_to (for freed state).
+                        if let Some(owners) = state.owner_alias.get(&arg0).cloned() {
+                            if !owners.is_empty() {
+                                state.owner_alias.insert(dest, owners);
+                            }
+                        }
+                        if let Some(objs) = state.points_to.get(&arg0).cloned() {
+                            if !objs.is_empty() {
+                                state.points_to.insert(dest, objs);
+                            }
+                        }
+                    }
+                    // Don't escape the source arg — it's being read, not consumed.
+                } else {
+                    // Truly unknown call: escape tracked raw-pointer args, clear dest.
+                    escape_raw_ptr_args(state, body, args);
+                }
                 state.local_proto.remove(&dest);
                 state.init.remove(&dest);
                 state.buf_written.remove(&dest);
@@ -607,6 +665,15 @@ fn update_owner_alias<'tcx>(
     let root = place.local;
     let has_deref = place.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
     let has_field = place.projection.iter().any(|e| matches!(e, ProjectionElem::Field(..)));
+    // Only pointer-like types (raw pointer, reference, struct/enum — e.g. NonNull)
+    // can alias a buffer. Never track integer, float, bool, or char locals: reading
+    // a `len: usize` field via `*self` would otherwise spuriously get owner_alias.
+    let dst_ty = body.local_decls[dst].ty;
+    if matches!(dst_ty.kind(), TyKind::Int(..) | TyKind::Uint(..) | TyKind::Float(..) | TyKind::Bool | TyKind::Char) {
+        state.owner_alias.remove(&dst);
+        return;
+    }
+
     let owners: std::collections::BTreeSet<Local> = if let Some(existing) = state.owner_alias.get(&root) {
         // Source is already owner-aliased — propagate through copy / field / deref.
         existing.clone()
@@ -616,8 +683,8 @@ fn update_owner_alias<'tcx>(
     } else if has_field && is_param(body, root) {
         // Reading a field of a by-value parameter (e.g. `let p = self.pointer`
         // where `self` is taken by value): the field handle aliases the
-        // parameter's buffer. Harmless for non-pointer fields — detection only
-        // fires when such a handle later reaches a deref / from_raw.
+        // parameter's buffer. Only meaningful for pointer-typed fields, but the
+        // type guard above already excludes integers/booleans/floats.
         std::iter::once(root).collect()
     } else {
         std::collections::BTreeSet::new()

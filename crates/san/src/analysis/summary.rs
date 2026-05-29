@@ -132,10 +132,21 @@ pub fn extract_summary<'tcx>(
         .any(|id| id.0 < SUMMARY_BASE && matches!(exit_state.heap.get(&id), Some(HeapState::RawOwned)));
 
     // If the return value aliases the interior of a parameter, record which one.
-    // Owner locals are parameter locals 1..=arg_count; param index = local - 1.
+    // Two detection paths:
+    // 1. Via owner_alias: the return local's alias set contains a reference parameter.
+    // 2. Via points_to: the return local points to an object whose ID matches a raw
+    //    pointer parameter local (e.g. ptr::add returns a pointer derived from param 0).
+    //    Such objects have ObjectId(local.as_u32()) where local is 1..=arg_count.
     let returns_alias_of_param = exit_state.owners_of(return_local).find_map(|owner| {
         let k = owner.as_usize();
         (k >= 1 && k <= body.arg_count).then(|| k - 1)
+    }).or_else(|| {
+        // Check whether the return value traces back to a raw-pointer parameter's
+        // initial object. ptr::add/sub/offset all have this shape.
+        exit_state.objects_for(return_local).find_map(|id| {
+            let k = id.0 as usize;
+            (k >= 1 && k <= body.arg_count && id.0 < SUMMARY_BASE).then(|| k - 1)
+        })
     });
 
     // A parameter whose buffer was reallocated anywhere in the body (tracked in

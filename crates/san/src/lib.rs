@@ -206,13 +206,34 @@ pub fn debug_print_all_paths(tcx: TyCtxt<'_>) {
     }
 }
 
-/// Well-known std accessors that hand back a pointer into `self`'s owned
-/// allocation (`Vec`/slice/`String`). Used to seed a cross-crate alias-of-param
-/// effect that the bounded summary computation cannot derive through std's
-/// deeply-nested internals.
-fn is_owned_buffer_accessor(path: &str) -> bool {
-    (path.ends_with("::as_mut_ptr") || path.ends_with("::as_ptr"))
-        && (path.contains("vec::Vec") || path.contains("[T]") || path.contains("string::String"))
+/// Well-known std functions that return a pointer with the same provenance as
+/// their first argument — i.e. `alias_of_param = Some(0)`. Two groups:
+///   • owned-buffer accessors (`Vec`/slice/`String` `as_ptr`/`as_mut_ptr`)
+///   • pointer-arithmetic / transforms that preserve provenance: `ptr::add/sub/offset`,
+///     `NonNull` wrap/unwrap/cast, `slice::from_raw_parts*`.
+/// Used to seed a cross-crate alias-of-param effect that the bounded summary
+/// computation cannot derive, and to handle the fallback path (no summary available).
+pub fn is_owned_buffer_accessor(path: &str) -> bool {
+    let buffer_accessor = (path.ends_with("::as_mut_ptr") || path.ends_with("::as_ptr"))
+        && (path.contains("vec::Vec") || path.contains("[T]") || path.contains("string::String"));
+    let nonnull_transform = path.contains("NonNull")
+        && (path.ends_with("::as_ptr")
+            || path.ends_with("::new_unchecked")
+            || path.ends_with("::new")
+            || path.ends_with("::cast")
+            || path.ends_with("::as_mut")
+            || path.ends_with("::as_ref"));
+    let raw_ptr_transform = (path.contains("const_ptr") || path.contains("mut_ptr"))
+        && (path.ends_with("::offset")
+            || path.ends_with("::add")
+            || path.ends_with("::sub")
+            || path.ends_with("::wrapping_offset")
+            || path.ends_with("::wrapping_add")
+            || path.ends_with("::wrapping_sub")
+            || path.ends_with("::cast"));
+    let slice_build = path.ends_with("slice::from_raw_parts")
+        || path.ends_with("slice::from_raw_parts_mut");
+    buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build
 }
 
 pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {

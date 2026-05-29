@@ -251,7 +251,14 @@ impl BlockState {
     pub fn escape_local(&mut self, local: Local) {
         if let Some(objs) = self.points_to.remove(&local) {
             for id in objs {
-                self.heap.insert(id, HeapState::Escaped);
+                // Do not downgrade a freed/reconstituted state to Escaped.
+                // An opaque call that receives a stale (MaybeFreed) pointer does
+                // not make the stale-ness disappear — other locals that alias the
+                // same object should still see it as freed.
+                let current = self.heap.get(&id).copied();
+                if !matches!(current, Some(HeapState::Reconstituted) | Some(HeapState::MaybeFreed)) {
+                    self.heap.insert(id, HeapState::Escaped);
+                }
             }
         }
         self.local_proto.remove(&local);
