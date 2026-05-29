@@ -80,6 +80,7 @@ declare -A EXPECTED=(
     [xcrate_buffer_uaf]="use_after_free"
     [fnptr_uaf]="use_after_free"
     [realloc_use_after]="use_after_free"
+    [wrapper_realloc_uaf]="use_after_free"
     [slice_chunks_unchecked]="slice_chunks_unchecked"
     [split_at_unchecked]="split_at_unchecked"
     [slice_disjoint_unchecked]="slice_disjoint_unchecked"

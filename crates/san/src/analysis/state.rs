@@ -50,6 +50,11 @@ pub struct BlockState {
     /// target and its summary applied. Join keeps a mapping only if all paths
     /// agree on the target (must-resolve), so resolution stays conservative.
     pub fn_ptr_targets: HashMap<Local, DefId>,
+    /// Parameter locals whose backing buffer was reallocated somewhere in this
+    /// body (a realloc method called on a value aliasing the parameter). Used to
+    /// derive a `reallocs_param` summary so wrapper methods like
+    /// `BitVec::into_boxed_slice` propagate the realloc effect. Join is UNION.
+    pub realloced_params: BTreeSet<Local>,
 }
 
 impl BlockState {
@@ -195,6 +200,13 @@ impl BlockState {
         if merged != result.fn_ptr_targets {
             changed = true;
             result.fn_ptr_targets = merged;
+        }
+
+        // Join realloced_params: UNION.
+        for &p in &other.realloced_params {
+            if result.realloced_params.insert(p) {
+                changed = true;
+            }
         }
 
         (result, changed)

@@ -315,7 +315,11 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
                     s.returns_alias_of_param = Some(0);
                 }
             }
-            if !s.param_effects.is_empty() || s.returns_raw_owned || s.returns_alias_of_param.is_some() {
+            if !s.param_effects.is_empty()
+                || s.returns_raw_owned
+                || s.returns_alias_of_param.is_some()
+                || s.reallocs_param.is_some()
+            {
                 summaries.insert(def_id, s);
             } else {
                 summaries.remove(&def_id);

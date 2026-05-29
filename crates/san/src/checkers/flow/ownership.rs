@@ -111,7 +111,15 @@ impl Checker for OwnershipProtocol {
                     // cross-function/-Drop shape that intra-procedural analysis
                     // and the ownership round-trip checks both miss.
                     for &freed_local in &freed {
-                        if !in_drop && state.owners_of(freed_local).next().is_some() {
+                        // Only a REFERENCE-parameter owner (`&mut self`) is left
+                        // dangling by this free — a by-value owner is consumed
+                        // (e.g. `into_vec(self)` does `from_raw_parts` then
+                        // `forget(self)`, which is correct). By-value owners are
+                        // handled only by the realloc-stale path, not here.
+                        let owns_live_ref = state
+                            .owners_of(freed_local)
+                            .any(|o| crate::analysis::transfer::is_reference_param(body, o));
+                        if !in_drop && owns_live_ref {
                             findings.push(Finding {
                                 rule_id: "use_after_free",
                                 severity: Severity::Warning,
