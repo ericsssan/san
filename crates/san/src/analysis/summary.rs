@@ -26,7 +26,7 @@ pub enum ParamHeapEffect {
 
 /// Compact summary of what a function does to raw-pointer parameters and its
 /// return value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FnSummary {
     /// `(param_index, effect)` — only parameters with a non-`None` effect are stored.
     pub param_effects: Vec<(usize, ParamHeapEffect)>,
@@ -141,7 +141,11 @@ pub fn apply_fn_summary<'tcx>(
                         state.heap.insert(id, HeapState::Reconstituted);
                     }
                 }
-                state.points_to.remove(&arg_local);
+                // Keep `arg_local` pointing at the now-`Reconstituted` object
+                // (do NOT remove it from `points_to`): the callee took ownership,
+                // so any *subsequent* use of this pointer in the caller is a
+                // use-after-free. Mirrors the literal `from_raw` handler, which
+                // also leaves the source local linked so a second use is caught.
                 state.local_proto.remove(&arg_local);
             }
             ParamHeapEffect::Escaped => {

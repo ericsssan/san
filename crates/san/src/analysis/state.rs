@@ -204,4 +204,46 @@ impl BlockState {
     pub fn local_is_bounded(&self, local: Local) -> bool {
         self.bounded.contains(&local)
     }
+
+    /// Classifies whether using the pointer in `local` is a use-after-free.
+    /// An object is "freed" once its backing allocation's ownership was handed
+    /// off: `Reconstituted` (a `from_raw`/consuming call took it). `MaybeFreed`
+    /// means freed on at least one joined control-flow path. `Escaped` is NOT
+    /// freed — its provenance is merely unknown, so using it is not provably a
+    /// UAF and must not be flagged.
+    pub fn freed_kind(&self, local: Local) -> FreedKind {
+        let objs: Vec<_> = self.objects_for(local).collect();
+        if objs.is_empty() {
+            return FreedKind::NotFreed;
+        }
+        let mut any_freed = false;
+        let mut all_reconstituted = true;
+        for id in &objs {
+            match self.heap.get(id) {
+                Some(HeapState::Reconstituted) => any_freed = true,
+                Some(HeapState::MaybeFreed) => {
+                    any_freed = true;
+                    all_reconstituted = false;
+                }
+                _ => all_reconstituted = false,
+            }
+        }
+        match (any_freed, all_reconstituted) {
+            (true, true) => FreedKind::Definite,
+            (true, false) => FreedKind::Potential,
+            _ => FreedKind::NotFreed,
+        }
+    }
+}
+
+/// Result of [`BlockState::freed_kind`]: whether dereferencing a pointer is a
+/// use-after-free.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FreedKind {
+    /// No tracked object is freed (or the pointer is untracked / escaped).
+    NotFreed,
+    /// Every tracked object was reconstituted on all paths — a definite UAF.
+    Definite,
+    /// Freed on some path / some object — a potential UAF.
+    Potential,
 }

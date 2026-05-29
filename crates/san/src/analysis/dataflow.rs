@@ -32,6 +32,25 @@ impl FlowResults {
         }
         Some(state)
     }
+
+    /// Recompute the state at an arbitrary `Location` by replaying the block's
+    /// statements up to (but not including) `location.statement_index`. For a
+    /// terminator location (`statement_index == statements.len()`) this is the
+    /// same as `state_before_terminator`. Returns `None` if unreachable.
+    pub fn state_at_location<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        location: rustc_middle::mir::Location,
+    ) -> Option<BlockState> {
+        let mut state = self.state_at(location.block)?.clone();
+        let block = &body.basic_blocks[location.block];
+        let upto = location.statement_index.min(block.statements.len());
+        for stmt in &block.statements[..upto] {
+            apply_statement(&mut state, tcx, body, stmt);
+        }
+        Some(state)
+    }
 }
 
 /// Forward worklist fixpoint over `body`. Findings are NOT generated here —
