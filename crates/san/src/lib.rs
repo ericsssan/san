@@ -206,6 +206,15 @@ pub fn debug_print_all_paths(tcx: TyCtxt<'_>) {
     }
 }
 
+/// Well-known std accessors that hand back a pointer into `self`'s owned
+/// allocation (`Vec`/slice/`String`). Used to seed a cross-crate alias-of-param
+/// effect that the bounded summary computation cannot derive through std's
+/// deeply-nested internals.
+fn is_owned_buffer_accessor(path: &str) -> bool {
+    (path.ends_with("::as_mut_ptr") || path.ends_with("::as_ptr"))
+        && (path.contains("vec::Vec") || path.contains("[T]") || path.contains("string::String"))
+}
+
 pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
     let name = tcx.crate_name(LOCAL_CRATE);
     eprintln!("san: analyzing crate `{name}`");
@@ -229,6 +238,50 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
         })
         .collect();
 
+    // Cross-crate summaries: also summarize external callees whose MIR is
+    // exported (generic / `#[inline]` fns — std ships MIR for these). This lets
+    // a consume / alias-of-param effect resolve across a crate boundary, e.g. a
+    // dependency's deallocator or `Vec::as_mut_ptr` handing back self's buffer.
+    // Bounded by breadth (depth from local code) and a hard cap so we never try
+    // to drag in all of std.
+    const MAX_EXTERNAL_DEPTH: usize = 2;
+    const MAX_EXTERNAL_FNS: usize = 600;
+    let mut to_summarize: Vec<rustc_hir::def_id::DefId> = local_fns.clone();
+    {
+        use rustc_middle::mir::TerminatorKind;
+        let mut in_set: std::collections::HashSet<_> = local_fns.iter().copied().collect();
+        let mut frontier = local_fns.clone();
+        let mut ext_count = 0usize;
+        for _ in 0..MAX_EXTERNAL_DEPTH {
+            if ext_count >= MAX_EXTERNAL_FNS {
+                break;
+            }
+            let mut next = Vec::new();
+            for &def_id in &frontier {
+                for bb in tcx.optimized_mir(def_id).basic_blocks.iter() {
+                    let Some(term) = &bb.terminator else { continue };
+                    let TerminatorKind::Call { func, .. } = &term.kind else { continue };
+                    let Some((callee, _)) = func.const_fn_def() else { continue };
+                    if in_set.contains(&callee) || ext_count >= MAX_EXTERNAL_FNS {
+                        continue;
+                    }
+                    if matches!(tcx.def_kind(callee), DefKind::Fn | DefKind::AssocFn)
+                        && tcx.is_mir_available(callee)
+                    {
+                        in_set.insert(callee);
+                        to_summarize.push(callee);
+                        next.push(callee);
+                        ext_count += 1;
+                    }
+                }
+            }
+            frontier = next;
+            if frontier.is_empty() {
+                break;
+            }
+        }
+    }
+
     // Interprocedural summary computation by chaotic iteration to a fixpoint.
     // Each round recomputes every function's summary against the previous
     // round's snapshot, so effects propagate one extra call level per round:
@@ -240,10 +293,28 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
     let mut summaries = analysis::SummaryMap::new();
     for _ in 0..MAX_SUMMARY_ROUNDS {
         let snap = summaries.clone();
-        for &def_id in &local_fns {
+        for &def_id in &to_summarize {
             let body = tcx.optimized_mir(def_id);
             let flow = analysis::compute_flow_for_summary(tcx, body, &snap);
-            let s = analysis::summary::extract_summary(tcx, body, &flow);
+            let mut s = analysis::summary::extract_summary(tcx, body, &flow);
+            // For EXTERNAL functions we trust only the structurally-safe
+            // `returns_alias_of_param` effect. The consume (`Reconstituted`) and
+            // `returns_raw_owned` effects are unsound to propagate across a crate
+            // boundary blindly: an external fn that internally calls `from_raw`
+            // (e.g. `Arc::decrement_strong_count`) does NOT necessarily consume
+            // the caller's pointer — refcount semantics keep it valid — so
+            // trusting that would produce false double-frees in correct code.
+            if !def_id.is_local() {
+                s.param_effects.clear();
+                s.returns_raw_owned = false;
+                // Curated knowledge for std's owned-buffer accessors, whose real
+                // provenance chain (Vec -> RawVec -> Unique -> NonNull) is deeper
+                // than the summary depth cap: they return a pointer into `self`'s
+                // owned allocation, so the result aliases parameter 0.
+                if is_owned_buffer_accessor(&tcx.def_path_str(def_id)) {
+                    s.returns_alias_of_param = Some(0);
+                }
+            }
             if !s.param_effects.is_empty() || s.returns_raw_owned || s.returns_alias_of_param.is_some() {
                 summaries.insert(def_id, s);
             } else {
