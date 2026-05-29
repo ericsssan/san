@@ -146,6 +146,11 @@ impl<'a, 'tcx> Visitor<'tcx> for DerefVisitor<'a, 'tcx> {
                         }
                         FreedKind::NotFreed => {}
                     }
+                    // Suppress if flow proves this pointer is a live into_raw
+                    // (same suppression ptr_read/ptr_write use).
+                    if state.ptr_is_raw_owned(base.local) {
+                        continue;
+                    }
                 }
             }
 
