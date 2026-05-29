@@ -111,6 +111,7 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::trusted_len_impl::TrustedLenImpl,
     &checkers::trusted_step_impl::TrustedStepImpl,
     &checkers::allocator_impl::AllocatorImpl,
+    &checkers::unsafe_fn_call::UnsafeFnCall,
     &checkers::unsafe_fn_ptr::UnsafeFnPtr,
     &checkers::slice_chunks_unchecked::SliceChunksUnchecked,
     &checkers::split_at_unchecked::SplitAtUnchecked,
@@ -270,6 +271,26 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
     // Collapsing duplicates removes no distinct finding — no false-negative risk.
     let mut seen = std::collections::HashSet::new();
     findings.retain(|f| seen.insert((f.rule_id, f.span.lo(), f.span.hi())));
+
+    // `unsafe_fn_call` is a backstop: it should fire only where no more-specific
+    // checker already spoke. Drop any of its findings whose call-site span
+    // overlaps a finding from another rule (e.g. the `NonNull::as_mut` deref on
+    // the same `L::pointers(p).as_mut()` line). Spans overlap when their byte
+    // ranges intersect; a method-call span typically contains its receiver call.
+    let mut covered: Vec<(rustc_span::BytePos, rustc_span::BytePos)> = findings
+        .iter()
+        .filter(|f| f.rule_id != "unsafe_fn_call")
+        .map(|f| (f.span.lo(), f.span.hi()))
+        .collect();
+    covered.sort();
+    findings.retain(|f| {
+        if f.rule_id != "unsafe_fn_call" {
+            return true;
+        }
+        let (lo, hi) = (f.span.lo(), f.span.hi());
+        // Keep only if no other-rule span intersects [lo, hi).
+        !covered.iter().any(|&(clo, chi)| clo < hi && lo < chi)
+    });
 
     findings
 }

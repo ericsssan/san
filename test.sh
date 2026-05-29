@@ -74,6 +74,7 @@ declare -A EXPECTED=(
     [trusted_step_impl]="trusted_step_impl"
     [allocator_impl]="allocator_impl"
     [unsafe_fn_ptr]="unsafe_fn_ptr"
+    [unsafe_fn_call]="unsafe_fn_call"
     [slice_chunks_unchecked]="slice_chunks_unchecked"
     [split_at_unchecked]="split_at_unchecked"
     [slice_disjoint_unchecked]="slice_disjoint_unchecked"
