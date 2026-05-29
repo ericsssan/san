@@ -10,6 +10,7 @@ fn main() {
     mem::forget(s);
     let _ = (ptr, len, cap);
 
-    // Bug: ManuallyDrop::new — destructor suppressed; must be managed explicitly.
+    // ManuallyDrop::new is a safe constructor and is intentionally NOT flagged
+    // by mem_forget; its unsafe siblings drop/take are covered by manually_drop.
     let _md = ManuallyDrop::new(vec![1u32, 2, 3]);
 }
