@@ -339,17 +339,22 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
                 if is_owned_buffer_accessor(&path) {
                     s.returns_alias_of_param = Some(0);
                 }
-                // Only preserve `returns_ptr_of_param` for pointer-cast operations
-                // (ptr::cast, NonNull::cast). Pointer-arithmetic operations like
-                // ptr::sub/add stabilise cross-crate summaries in unexpected ways —
-                // specifically, they keep wrapper functions' Reconstituted effects
-                // alive across chaotic-iteration rounds, causing false owner-aliased-
+                // Only preserve `returns_ptr_of_param` for identity pointer operations
+                // (ptr::cast, NonNull::cast, NonNull::new_unchecked, NonNull::new).
+                // Pointer-arithmetic functions like ptr::sub/add stabilise cross-crate
+                // summaries in unexpected ways — they keep wrapper functions' Reconstituted
+                // effects alive across chaotic-iteration rounds, causing false owner-aliased-
                 // free positives in correct code (e.g. bytes::rebuild_vec).
                 let is_ptr_cast = path.contains("::cast")
                     && (path.contains("const_ptr")
                         || path.contains("mut_ptr")
                         || path.contains("NonNull"));
-                if !is_ptr_cast {
+                // NonNull::new_unchecked / NonNull::new wrap a raw pointer in a NonNull;
+                // the raw-ownership tracking must survive so returning the NonNull or a
+                // struct containing it is not falsely flagged as a memory leak.
+                let is_nonnull_wrap = path.contains("NonNull")
+                    && (path.ends_with("::new_unchecked") || path.ends_with("::new"));
+                if !is_ptr_cast && !is_nonnull_wrap {
                     s.returns_ptr_of_param = None;
                 }
             }

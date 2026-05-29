@@ -134,6 +134,34 @@ pub fn apply_statement<'tcx>(
                 state.bounded.remove(&dst_local);
             }
         }
+        // Aggregate struct/tuple/enum construction: if any operand carries raw-pointer
+        // ownership tracking, propagate it to the aggregate so that returning a struct
+        // wrapping an `into_raw` pointer is not falsely reported as a leak. For example,
+        // `Box::into_raw(b).cast()` stored in a `NonNull` field and returned as part of
+        // `RawTask { ptr: nonull }` must show the owned object in the return value.
+        Rvalue::Aggregate(_, operands) => {
+            let agg_objs: std::collections::BTreeSet<_> = operands
+                .iter()
+                .filter_map(|op| match op {
+                    Operand::Copy(p) | Operand::Move(p) if p.projection.is_empty() => {
+                        state.points_to.get(&p.local)
+                    }
+                    _ => None,
+                })
+                .flat_map(|objs| objs.iter().copied())
+                .collect();
+            if !agg_objs.is_empty() {
+                state.points_to.insert(dst_local, agg_objs);
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
         // Pointer-identity casts (PtrToPtr, Transmute) preserve the allocation
         // the pointer refers into — dst points to the same objects as src. This
         // matters for stale-pointer detection: after a realloc, a *mut T → *const T
