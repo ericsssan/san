@@ -243,8 +243,8 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
         for &def_id in &local_fns {
             let body = tcx.optimized_mir(def_id);
             let flow = analysis::compute_flow_for_summary(tcx, body, &snap);
-            let s = analysis::summary::extract_summary(body, &flow);
-            if !s.param_effects.is_empty() || s.returns_raw_owned {
+            let s = analysis::summary::extract_summary(tcx, body, &flow);
+            if !s.param_effects.is_empty() || s.returns_raw_owned || s.returns_alias_of_param.is_some() {
                 summaries.insert(def_id, s);
             } else {
                 summaries.remove(&def_id);
@@ -262,6 +262,9 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
 
     // Per-body MIR checks. Flow is computed once per body and passed to every
     // checker so they can optionally suppress findings that flow shows are safe.
+    // Wrap the converged summaries in an `Rc` so each `FlowResults` can carry
+    // them cheaply to checkers that need interprocedural effects.
+    let summaries = std::rc::Rc::new(summaries);
     for &def_id in &local_fns {
         let body = tcx.optimized_mir(def_id);
         let flow = analysis::compute_flow(tcx, body, &summaries);

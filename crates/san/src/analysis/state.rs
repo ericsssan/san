@@ -35,6 +35,15 @@ pub struct BlockState {
     pub ge_facts: HashMap<Local, Local>,
     /// Locals proven to be < some length (via Assert terminator). Join is INTERSECTION.
     pub bounded: HashSet<Local>,
+    /// pointer-local → set of *owner* locals whose interior allocation this
+    /// pointer aliases. Established when a pointer is loaded from the interior of
+    /// an owner (typically `&mut self`), directly or via a callee summarised as
+    /// returning a pointer into a parameter. BROKEN by any write to the owner
+    /// (the field may have been reassigned). Join is UNION (may-alias): if the
+    /// pointer aliases an owner on *any* incoming path, freeing it there can
+    /// leave that owner dangling. Used to detect double-free / UAF where the
+    /// second free happens later through the owner (e.g. its `Drop`).
+    pub owner_alias: HashMap<Local, BTreeSet<Local>>,
 }
 
 impl BlockState {
@@ -156,7 +165,55 @@ impl BlockState {
             result.bounded = new_bounded;
         }
 
+        // Join owner_alias: UNION (may-alias) — a free is unsafe if the pointer
+        // aliases a live owner on ANY path reaching it.
+        for (local, owners) in &other.owner_alias {
+            let entry = result.owner_alias.entry(*local).or_default();
+            let before = entry.len();
+            for &o in owners {
+                entry.insert(o);
+            }
+            if entry.len() != before {
+                changed = true;
+            }
+        }
+
         (result, changed)
+    }
+
+    /// Record that `ptr` aliases the interior of owner `owner`.
+    pub fn set_owner_alias(&mut self, ptr: Local, owner: Local) {
+        self.owner_alias.entry(ptr).or_default().insert(owner);
+    }
+
+    /// Propagate any owner-alias from `src` onto `dst` (used for copy/move/cast/
+    /// aggregate-field rvalues). Clears `dst`'s entry if `src` has none.
+    pub fn copy_owner_alias(&mut self, dst: Local, src: Local) {
+        match self.owner_alias.get(&src).cloned() {
+            Some(owners) => {
+                self.owner_alias.insert(dst, owners);
+            }
+            None => {
+                self.owner_alias.remove(&dst);
+            }
+        }
+    }
+
+    /// A write to (any projection rooted at) `owner` may reassign the field the
+    /// alias referred to, so every alias to `owner` is conservatively broken.
+    pub fn invalidate_owner(&mut self, owner: Local) {
+        for owners in self.owner_alias.values_mut() {
+            owners.remove(&owner);
+        }
+        self.owner_alias.retain(|_, owners| !owners.is_empty());
+    }
+
+    /// The owner locals (if any) whose interior `ptr` currently aliases.
+    pub fn owners_of(&self, ptr: Local) -> impl Iterator<Item = Local> + '_ {
+        self.owner_alias
+            .get(&ptr)
+            .into_iter()
+            .flat_map(|s| s.iter().copied())
     }
 
     /// Mark all objects reachable from `local` as Escaped and remove tracking.
@@ -167,6 +224,7 @@ impl BlockState {
             }
         }
         self.local_proto.remove(&local);
+        self.owner_alias.remove(&local);
     }
 
     pub fn objects_for(&self, local: Local) -> impl Iterator<Item = ObjectId> + '_ {

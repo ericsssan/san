@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::rc::Rc;
 
 use rustc_middle::mir::{BasicBlock, BasicBlockData, Body, TerminatorKind, UnwindAction};
 use rustc_middle::ty::TyCtxt;
@@ -11,6 +12,10 @@ pub struct FlowResults {
     /// Stable fixpoint state at the entry of each basic block.
     /// `None` means the block is unreachable.
     pub entry_states: Vec<Option<BlockState>>,
+    /// The interprocedural summaries this body was analyzed against, so checkers
+    /// can tell which calls free which parameter (e.g. a `deallocate(p)` whose
+    /// summary reconstitutes param 0). Empty during summary extraction itself.
+    pub summaries: Rc<SummaryMap>,
 }
 
 impl FlowResults {
@@ -58,9 +63,10 @@ impl FlowResults {
 pub fn compute_flow<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
-    summaries: &SummaryMap,
+    summaries: &Rc<SummaryMap>,
 ) -> FlowResults {
-    run_fixpoint(tcx, body, BlockState::default(), summaries)
+    let entry_states = run_fixpoint(tcx, body, BlockState::default(), summaries);
+    FlowResults { entry_states, summaries: Rc::clone(summaries) }
 }
 
 /// Like `compute_flow` but seeds the entry block with the raw-pointer
@@ -72,17 +78,17 @@ pub fn compute_flow_for_summary<'tcx>(
     summaries: &SummaryMap,
 ) -> FlowResults {
     use crate::analysis::summary::summary_initial_state;
-    run_fixpoint(tcx, body, summary_initial_state(body), summaries)
+    let entry_states = run_fixpoint(tcx, body, summary_initial_state(body), summaries);
+    FlowResults { entry_states, summaries: Rc::new(SummaryMap::new()) }
 }
 
-/// Internal worklist fixpoint engine. Both `compute_flow` and
-/// `compute_flow_for_summary` are thin wrappers around this function.
+/// Internal worklist fixpoint engine, returning the per-block entry states.
 fn run_fixpoint<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     initial_state: BlockState,
     summaries: &SummaryMap,
-) -> FlowResults {
+) -> Vec<Option<BlockState>> {
     let num_blocks = body.basic_blocks.len();
     let mut entry_states: Vec<Option<BlockState>> = vec![None; num_blocks];
 
@@ -136,7 +142,7 @@ fn run_fixpoint<'tcx>(
         }
     }
 
-    FlowResults { entry_states }
+    entry_states
 }
 
 fn block_successors(block_data: &BasicBlockData<'_>) -> Vec<BasicBlock> {

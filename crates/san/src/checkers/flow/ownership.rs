@@ -14,6 +14,7 @@
 /// (identified by basic block index) is a unique abstract object. The heap state
 /// lattice is `RawOwned → Reconstituted / Freed / Escaped / MaybeFreed`.
 use crate::analysis::object::HeapState;
+use crate::analysis::summary::{nth_arg_local, ParamHeapEffect};
 use crate::analysis::transfer::{first_arg_local, is_from_raw};
 use crate::analysis::FlowResults;
 use crate::{Finding, Checker, Severity};
@@ -31,6 +32,11 @@ impl Checker for OwnershipProtocol {
     ) -> Vec<Finding> {
         let mut findings = Vec::new();
         let mut leaked_objects = std::collections::HashSet::new();
+
+        // Inside `Drop::drop`, freeing the receiver's owned buffer is the whole
+        // point — the owner is being destroyed, so it is not "left dangling".
+        // Suppress the owner-aliased-free detection there to avoid false positives.
+        let in_drop = is_drop_method(tcx, body);
 
         for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             // Replay statements to get the state just before the terminator.
@@ -73,6 +79,44 @@ impl Checker for OwnershipProtocol {
                 TerminatorKind::Call { func, args, .. } => {
                     let Some((def_id, _)) = func.const_fn_def() else { continue };
                     let path = tcx.def_path_str(def_id);
+
+                    // Determine which argument locals this call frees: directly via
+                    // `from_raw`, or via a callee summarised as reconstituting a
+                    // parameter (e.g. smallvec's `deallocate` → `Vec::from_raw_parts`).
+                    let mut freed: Vec<Local> = Vec::new();
+                    if is_from_raw(&path) {
+                        freed.extend(first_arg_local(args));
+                    } else if let Some(summary) = flow.summaries.get(&def_id) {
+                        for (idx, effect) in &summary.param_effects {
+                            if *effect == ParamHeapEffect::Reconstituted {
+                                freed.extend(nth_arg_local(args, *idx));
+                            }
+                        }
+                    }
+                    if freed.is_empty() {
+                        continue;
+                    }
+
+                    // Freeing a pointer that still aliases the interior of a live
+                    // owner (e.g. `&mut self`'s heap buffer) leaves that owner
+                    // holding a dangling pointer — a use-after-free now and a
+                    // double-free when the owner is later dropped. This is the
+                    // cross-function/-Drop shape that intra-procedural analysis
+                    // and the ownership round-trip checks both miss.
+                    for &freed_local in &freed {
+                        if !in_drop && state.owners_of(freed_local).next().is_some() {
+                            findings.push(Finding {
+                                rule_id: "use_after_free",
+                                severity: Severity::Warning,
+                                span: terminator.source_info.span,
+                                message:
+                                    "freeing a pointer that still aliases memory owned by a live \
+                                     value (e.g. `&mut self`'s buffer) — the owner is left with a \
+                                     dangling pointer; double-free when it is dropped"
+                                        .to_string(),
+                            });
+                        }
+                    }
 
                     if !is_from_raw(&path) {
                         continue;
@@ -117,6 +161,22 @@ impl Checker for OwnershipProtocol {
 
         findings
     }
+}
+
+/// Is `body` a drop context — the `drop` method of a `Drop` impl, or the
+/// compiler-generated drop glue (`drop_in_place`) that the impl gets inlined
+/// into? Freeing the receiver's owned buffer is correct in both.
+fn is_drop_method<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
+    use rustc_middle::ty::InstanceKind;
+    if matches!(body.source.instance, InstanceKind::DropGlue(..)) {
+        return true;
+    }
+    let Some(drop_trait) = tcx.lang_items().drop_trait() else { return false };
+    // `drop` is an *impl* item, so resolve its impl and check the trait it
+    // implements (`trait_of_assoc` only covers items declared inside a trait).
+    let Some(impl_id) = tcx.impl_of_assoc(body.source.def_id()) else { return false };
+    tcx.impl_is_of_trait(impl_id)
+        && tcx.impl_trait_ref(impl_id).skip_binder().def_id == drop_trait
 }
 
 fn from_raw_short(path: &str) -> &str {
