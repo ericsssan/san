@@ -79,6 +79,7 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::ptr_read::PtrRead,
     &checkers::ptr_write::PtrWrite,
     &checkers::raw_allocator::RawAllocator,
+    &checkers::raw_ptr_deref::RawPtrDeref,
     &checkers::raw_fd::RawFd,
     &checkers::slice_align_to::SliceAlignTo,
     &checkers::slice_from_raw_parts::SliceFromRawParts,
