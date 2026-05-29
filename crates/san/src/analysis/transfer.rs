@@ -195,16 +195,24 @@ pub fn apply_terminator<'tcx>(
 ) {
     match &term.kind {
         TerminatorKind::Call { func, args, destination, .. } => {
+            let callee = func.const_fn_def().map(|(id, _)| id);
+            // An accessor that *returns* a pointer into a parameter does not
+            // reassign that parameter, so passing it by `&mut` must not break the
+            // alias — skip invalidation for that argument.
+            let alias_src_arg = callee
+                .and_then(|id| summaries.get(&id))
+                .and_then(|s| s.returns_alias_of_param);
+
             // A call may reach (and reassign a field of) any owner passed to it
             // by MUTABLE reference — conservatively break those aliases so a
             // later free isn't flagged on the strength of a now-stale alias.
             // Shared (`&`) borrows can't reassign the field, so they preserve it.
-            invalidate_owner_args(state, body, args);
+            invalidate_owner_args(state, body, args, alias_src_arg);
             // The destination is being redefined by the call.
             state.invalidate_owner(destination.local);
             state.owner_alias.remove(&destination.local);
 
-            let Some((def_id, _)) = func.const_fn_def() else {
+            let Some(def_id) = callee else {
                 escape_raw_ptr_args(state, body, args);
                 return;
             };
@@ -411,14 +419,20 @@ fn invalidate_owner_args<'tcx>(
     state: &mut BlockState,
     body: &Body<'tcx>,
     args: &[rustc_span::Spanned<Operand<'tcx>>],
+    skip_arg: Option<usize>,
 ) {
     let live_owners: std::collections::BTreeSet<Local> =
         state.owner_alias.values().flat_map(|s| s.iter().copied()).collect();
     let mut to_invalidate = std::collections::BTreeSet::new();
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
+        // Don't invalidate the argument the callee returns an alias of — an
+        // accessor does not reassign what it hands back.
+        if Some(i) == skip_arg {
+            continue;
+        }
         if let Operand::Move(p) | Operand::Copy(p) = &arg.node {
-            // Only a mutable reference / `*mut` argument can reassign the owner's
-            // field; a shared borrow leaves it intact and must not break aliases.
+            // Only a mutable reference argument can reassign the owner's field;
+            // a shared borrow leaves it intact and must not break aliases.
             if !is_mutable_ref_ty(body.local_decls[p.local].ty) {
                 continue;
             }
