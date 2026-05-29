@@ -49,7 +49,20 @@ pub fn apply_statement<'tcx>(
             let src_local = src.local;
             let objs = state.points_to.remove(&src_local).unwrap_or_default();
             let protos = state.local_proto.remove(&src_local).unwrap_or_default();
-            if !objs.is_empty() {
+            // Indirect write (*ptr = val, or (*self).field = val): the source value
+            // is being stored into memory we can't track via the base local. Escape
+            // the raw-owned objects rather than propagating them to dst_local (which
+            // would be the pointer base, not the actual target location).
+            let has_deref = dst.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+            if !dst.projection.is_empty() && has_deref {
+                for id in &objs {
+                    let current = state.heap.get(id).copied();
+                    if !matches!(current, Some(HeapState::Reconstituted) | Some(HeapState::MaybeFreed)) {
+                        state.heap.insert(*id, HeapState::Escaped);
+                    }
+                }
+                state.points_to.remove(&dst_local);
+            } else if !objs.is_empty() {
                 state.points_to.insert(dst_local, objs);
             } else {
                 state.points_to.remove(&dst_local);
@@ -92,8 +105,21 @@ pub fn apply_statement<'tcx>(
         }
         Rvalue::Use(Operand::Copy(src), _) if src.projection.is_empty() => {
             // Copy: alias — dst points to the same objects as src.
+            // For indirect writes (*ptr = copy val), the value is stored into external
+            // memory — escape any raw-owned objects tracked on src.
             let src_local = src.local;
-            if let Some(objs) = state.points_to.get(&src_local).cloned() {
+            let has_deref = dst.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+            if !dst.projection.is_empty() && has_deref {
+                if let Some(objs) = state.points_to.get(&src_local) {
+                    for id in objs.iter().copied().collect::<Vec<_>>() {
+                        let current = state.heap.get(&id).copied();
+                        if !matches!(current, Some(HeapState::Reconstituted) | Some(HeapState::MaybeFreed)) {
+                            state.heap.insert(id, HeapState::Escaped);
+                        }
+                    }
+                }
+                state.points_to.remove(&dst_local);
+            } else if let Some(objs) = state.points_to.get(&src_local).cloned() {
                 state.points_to.insert(dst_local, objs);
             } else {
                 state.points_to.remove(&dst_local);

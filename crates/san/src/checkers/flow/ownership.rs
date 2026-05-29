@@ -37,6 +37,9 @@ impl Checker for OwnershipProtocol {
         // point — the owner is being destroyed, so it is not "left dangling".
         // Suppress the owner-aliased-free detection there to avoid false positives.
         let in_drop = is_drop_method(tcx, body);
+        // Closures capture raw pointers for deferred use — the caller holds
+        // the actual owner, so intra-procedural leak detection is unsound here.
+        let in_closure = tcx.is_closure_like(body.source.def_id());
 
         for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             // Replay statements to get the state just before the terminator.
@@ -48,6 +51,9 @@ impl Checker for OwnershipProtocol {
 
             match &terminator.kind {
                 TerminatorKind::Return => {
+                    if in_closure {
+                        continue;
+                    }
                     // _0 is the return place in MIR; objects being returned to the caller
                     // are not leaks — the caller takes ownership.
                     let return_local = Local::from_usize(0);
