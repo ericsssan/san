@@ -43,6 +43,7 @@ declare -A EXPECTED=(
     [ptr_drop_in_place]="ptr_drop_in_place"
     [ptr_read]="ptr_read"
     [ptr_write]="ptr_write"
+    [raw_ptr_deref]="raw_ptr_deref"
     [raw_allocator]="raw_allocator"
     [raw_fd]="raw_fd"
     [slice_align_to]="slice_align_to"
