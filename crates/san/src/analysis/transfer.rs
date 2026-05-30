@@ -1083,7 +1083,8 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.contains("::Weak::")
         || path.contains("::Weak<")
         || path.contains("::CString::")
-        || path.contains("::CStr::");
+        || path.contains("::CStr::")
+        || path.contains("triomphe");
     tail_matches && type_matches
 }
 
@@ -1099,7 +1100,8 @@ pub fn is_from_raw(path: &str) -> bool {
             || path.contains("::Weak<")
             || path.contains("::Thread::")
             || path.contains("::CString::")
-            || path.contains("::CStr::"));
+            || path.contains("::CStr::")
+            || path.contains("triomphe"));
     let from_raw_in = path.ends_with("::from_raw_in")
         && (path.contains("::Box::")
             || path.contains("::Box<")
@@ -1113,6 +1115,8 @@ pub fn is_from_raw(path: &str) -> bool {
     let vec_parts = (path.ends_with("::from_raw_parts")
         || path.ends_with("::from_raw_parts_in"))
         && (path.contains("::Vec::") || path.contains("::Vec<") || path.contains("::String::"));
+    // triomphe's ThinArc::from_raw and from_raw_slice are ownership-reconstituting.
+    let triomphe_thin = path.ends_with("::from_raw_slice") && path.contains("triomphe");
     // Raw allocator dealloc: when a tracked pointer (from into_raw) is cast to *mut u8
     // and passed to alloc::dealloc or Allocator::deallocate, that constitutes a free
     // of the tracked allocation.
@@ -1120,7 +1124,7 @@ pub fn is_from_raw(path: &str) -> bool {
         "std::alloc::dealloc" | "core::alloc::dealloc" | "alloc::alloc::dealloc"
         | "__rust_dealloc")
         || path.ends_with("Allocator::deallocate");
-    direct || from_raw_in || from_non_null || vec_parts || raw_dealloc
+    direct || from_raw_in || from_non_null || vec_parts || raw_dealloc || triomphe_thin
 }
 
 pub fn is_mem_forget(path: &str) -> bool {

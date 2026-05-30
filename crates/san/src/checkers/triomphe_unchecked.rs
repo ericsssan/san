@@ -32,6 +32,8 @@
 /// Common bugs: reconstructing a triomphe Arc from a pointer produced by `std::sync::Arc`,
 /// reconstructing after the last live Arc has already been dropped (use-after-free),
 /// or calling `assume_init` before completing the initialization loop.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -39,18 +41,22 @@ use rustc_middle::ty::TyCtxt;
 pub struct TriompheUnchecked;
 
 impl Checker for TriompheUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
             if !path.contains("triomphe") {
                 continue;
             }
+
+            let is_from_raw = path.ends_with("::from_raw")
+                || path.ends_with("::from_raw_slice")
+                || (path.ends_with("::from_ptr") && path.contains("ArcBorrow"));
 
             let (fn_name, note) = if path.ends_with("::from_ptr") && path.contains("ArcBorrow") {
                 (
@@ -94,6 +100,23 @@ impl Checker for TriompheUnchecked {
             } else {
                 continue;
             };
+
+            // Flow-saturated: for from_raw variants, suppress when tracked and safe;
+            // escalate when the pointer is already reconstituted (double-free).
+            if is_from_raw {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(arg_local) = first_arg_local(args) {
+                        // Already freed → let ownership_double_free handle it; suppress Tier-1.
+                        if !matches!(state.freed_kind(arg_local), FreedKind::NotFreed) {
+                            continue;
+                        }
+                        // Tracked live-owned pointer → suppress Tier-1 (flow handles lifecycle).
+                        if state.objects_for(arg_local).next().is_some() {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "triomphe_unchecked",

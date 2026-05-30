@@ -24,6 +24,7 @@
 ///
 /// RustSec: RUSTSEC-2022-0062 (lz4-sys), RUSTSEC-2020-0160 (os_str_bytes),
 /// and many FFI binding crates that transfer Box/Arc ownership to C.
+use crate::analysis::object::{HeapState, ObjectId};
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -31,10 +32,21 @@ use rustc_middle::ty::TyCtxt;
 pub struct IntoRaw;
 
 impl Checker for IntoRaw {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        // Collect exit states once: for each Return block, the state before the
+        // Return terminator. Used to check whether into_raw objects are consumed.
+        let exit_states: Vec<_> = body.basic_blocks
+            .iter_enumerated()
+            .filter_map(|(bb, bd)| {
+                let t = bd.terminator.as_ref()?;
+                if !matches!(t.kind, TerminatorKind::Return) { return None; }
+                flow.state_before_terminator(tcx, body, bb)
+            })
+            .collect();
+
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
             let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
@@ -148,6 +160,19 @@ impl Checker for IntoRaw {
             } else {
                 continue;
             };
+
+            // Suppress when flow proves the pointer is consumed on all return paths:
+            // the object created at this site (keyed by basic-block index) is not
+            // still RawOwned at any exit point. Covers the common into_raw/from_raw
+            // pair in the same function — no audit noise for correctly-managed code.
+            let obj_id = ObjectId(bb.index() as u32);
+            if !exit_states.is_empty()
+                && exit_states.iter().all(|s| {
+                    !matches!(s.heap.get(&obj_id), Some(HeapState::RawOwned))
+                })
+            {
+                continue;
+            }
 
             findings.push(Finding {
                 rule_id: "into_raw",
