@@ -26,7 +26,6 @@
 /// common pattern in Python/Node.js bindings to Rust.
 use crate::analysis::state::FreedKind;
 use crate::analysis::transfer::first_arg_local;
-use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -160,16 +159,8 @@ impl Checker for ArcFromRaw {
             // OwnershipProtocol handles the precise intra-procedural detection.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(arg_local) = first_arg_local(args) {
-                    match state.freed_kind(arg_local) {
-                        FreedKind::Definite => {
-                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
-                            continue;
-                        }
-                        FreedKind::Potential => {
-                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
-                            continue;
-                        }
-                        FreedKind::NotFreed => {}
+                    if !matches!(state.freed_kind(arg_local), FreedKind::NotFreed) {
+                        continue;
                     }
                     if state.objects_for(arg_local).next().is_some() {
                         continue;
