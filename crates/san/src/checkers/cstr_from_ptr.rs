@@ -23,11 +23,9 @@
 ///
 /// `CString::from_vec_with_nul_unchecked(bytes)`:
 ///   • Bytes must contain exactly one null byte and it must be the final byte
-///
-/// `CString::from_raw(ptr)`:
-///   • `ptr` must have been returned by `CString::into_raw` from the same allocator
-///   • The CString must not be double-freed (calling from_raw twice on the same ptr is UB)
-///   • The original CString must have transferred ownership via `into_raw` beforehand
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -35,12 +33,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct CStrFromPtr;
 
 impl Checker for CStrFromPtr {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -70,15 +68,31 @@ impl Checker for CStrFromPtr {
                     "bytes must contain exactly one null byte and it must be the last byte; \
                      use CString::from_vec_with_nul (returns Result) instead",
                 )
-            } else if path.ends_with("CString::from_raw") {
-                (
-                    "CString::from_raw",
-                    "ptr must have been returned by CString::into_raw from the same allocator; \
-                     calling from_raw twice on the same pointer is double-free UB",
-                )
             } else {
                 continue;
             };
+
+            // Flow-sensitive checks for CStr::from_ptr only (other arms take non-pointer args).
+            if fn_name == "CStr::from_ptr" {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(ptr_local) = first_arg_local(args) {
+                        match state.freed_kind(ptr_local) {
+                            FreedKind::Definite => {
+                                findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                                continue;
+                            }
+                            FreedKind::Potential => {
+                                findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                                continue;
+                            }
+                            FreedKind::NotFreed => {}
+                        }
+                        if state.ptr_is_raw_owned(ptr_local) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "cstr_from_ptr",
