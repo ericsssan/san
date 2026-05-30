@@ -59,17 +59,16 @@ impl Checker for RawAllocator {
                 continue;
             };
 
-            // For dealloc: detect UAF if the pointer was already freed.
-            if fn_name == "dealloc" {
+            // dealloc and realloc both consume the pointer — detect UAF and suppress
+            // when the pointer is a live tracked raw-owned allocation.
+            if fn_name == "dealloc" || fn_name == "realloc" {
                 if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                     if let Some(ptr_local) = first_arg_local(args) {
+                        // Already-freed: ownership_double_free fires the precise finding.
                         match state.freed_kind(ptr_local) {
-                        // For dealloc on already-freed tracked pointers, ownership_double_free
-                        // in the flow checker fires the precise finding — suppress Tier-1 here.
-                        FreedKind::Definite | FreedKind::Potential => { continue; }
-                        FreedKind::NotFreed => {}
+                            FreedKind::Definite | FreedKind::Potential => { continue; }
+                            FreedKind::NotFreed => {}
                         }
-                        // Suppress if the pointer is still live-owned (valid for dealloc).
                         if state.ptr_is_raw_owned(ptr_local) {
                             continue;
                         }
