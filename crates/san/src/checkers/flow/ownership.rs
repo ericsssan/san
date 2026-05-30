@@ -142,43 +142,51 @@ impl Checker for OwnershipProtocol {
                         }
                     }
 
-                    if !is_from_raw(&path) {
-                        continue;
-                    }
-
-                    let Some(arg_local) = first_arg_local(args)
-                        .or_else(|| crate::analysis::transfer::first_arg_base_local(args))
-                    else {
-                        continue;
+                    // Double-free detection: the freed pointer was already reconstituted.
+                    // This covers both direct from_raw calls and summary-based reconstitutions
+                    // (e.g. a helper function that calls Box::from_raw on its argument).
+                    let double_free_locals: Vec<Local> = if is_from_raw(&path) {
+                        first_arg_local(args)
+                            .or_else(|| crate::analysis::transfer::first_arg_base_local(args))
+                            .into_iter()
+                            .collect()
+                    } else {
+                        freed.clone()
                     };
 
-                    for obj_id in state.objects_for(arg_local) {
-                        match state.heap.get(&obj_id) {
-                            Some(HeapState::Reconstituted) => {
-                                findings.push(Finding {
-                                    rule_id: "ownership_double_free",
-                                    severity: Severity::Warning,
-                                    span: terminator.source_info.span,
-                                    message: format!(
-                                        "`{}` called on a pointer that was already \
-                                         reconstituted on this path — double-free",
-                                        from_raw_short(&path)
-                                    ),
-                                });
+                    for df_local in double_free_locals {
+                        let call_name = if is_from_raw(&path) {
+                            from_raw_short(&path).to_string()
+                        } else {
+                            tcx.item_name(def_id).to_string()
+                        };
+                        for obj_id in state.objects_for(df_local) {
+                            match state.heap.get(&obj_id) {
+                                Some(HeapState::Reconstituted) => {
+                                    findings.push(Finding {
+                                        rule_id: "ownership_double_free",
+                                        severity: Severity::Warning,
+                                        span: terminator.source_info.span,
+                                        message: format!(
+                                            "`{call_name}` called on a pointer that was already \
+                                             reconstituted on this path — double-free",
+                                        ),
+                                    });
+                                }
+                                Some(HeapState::MaybeFreed) => {
+                                    findings.push(Finding {
+                                        rule_id: "ownership_double_free",
+                                        severity: Severity::Warning,
+                                        span: terminator.source_info.span,
+                                        message: format!(
+                                            "`{call_name}` — potential double-free: pointer may \
+                                             have already been reconstituted on another \
+                                             control-flow path",
+                                        ),
+                                    });
+                                }
+                                _ => {}
                             }
-                            Some(HeapState::MaybeFreed) => {
-                                findings.push(Finding {
-                                    rule_id: "ownership_double_free",
-                                    severity: Severity::Warning,
-                                    span: terminator.source_info.span,
-                                    message: format!(
-                                        "`{}` — potential double-free: pointer may have \
-                                         already been reconstituted on another control-flow path",
-                                        from_raw_short(&path)
-                                    ),
-                                });
-                            }
-                            _ => {}
                         }
                     }
                 }
