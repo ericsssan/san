@@ -75,19 +75,17 @@ impl Checker for AllocatorMethods {
                 continue;
             };
 
-            // For deallocate: detect UAF if the pointer was already freed, suppress if valid.
-            if fn_name == "Allocator::deallocate" {
-                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                    if let Some(ptr_local) = first_arg_local(args) {
-                        // For deallocate on already-freed tracked pointers, ownership_double_free
-                        // fires the precise finding — suppress Tier-1 here.
-                        match state.freed_kind(ptr_local) {
-                            FreedKind::Definite | FreedKind::Potential => { continue; }
-                            FreedKind::NotFreed => {}
-                        }
-                        if state.ptr_is_raw_owned(ptr_local) {
-                            continue;
-                        }
+            // Detect UAF for all three ops (dealloc, grow, shrink each consume the pointer).
+            // Suppress audit noise when the pointer is a live tracked raw-owned allocation.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(ptr_local) = first_arg_local(args) {
+                    // Already-freed pointer: ownership_double_free fires the precise finding.
+                    match state.freed_kind(ptr_local) {
+                        FreedKind::Definite | FreedKind::Potential => { continue; }
+                        FreedKind::NotFreed => {}
+                    }
+                    if state.ptr_is_raw_owned(ptr_local) {
+                        continue;
                     }
                 }
             }
