@@ -1079,7 +1079,9 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.contains("::String::")
         || path.contains("::Thread::")
         || path.contains("::Weak::")
-        || path.contains("::Weak<");
+        || path.contains("::Weak<")
+        || path.contains("::CString::")
+        || path.contains("::CStr::");
     tail_matches && type_matches
 }
 
@@ -1093,7 +1095,9 @@ pub fn is_from_raw(path: &str) -> bool {
             || path.contains("::Rc<")
             || path.contains("::Weak::")
             || path.contains("::Weak<")
-            || path.contains("::Thread::"));
+            || path.contains("::Thread::")
+            || path.contains("::CString::")
+            || path.contains("::CStr::"));
     let from_raw_in = path.ends_with("::from_raw_in")
         && (path.contains("::Box::")
             || path.contains("::Box<")

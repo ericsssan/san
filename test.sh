@@ -157,6 +157,7 @@ declare -A EXPECTED=(
     [ptr_read_double_free]="ownership_double_free"
     [manually_drop_double_free]="ownership_double_free"
     [maybeuninit_double_free]="ownership_double_free"
+    [cstring_double_free]="ownership_double_free"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""
