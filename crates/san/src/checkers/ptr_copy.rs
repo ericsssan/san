@@ -147,6 +147,15 @@ impl Checker for PtrCopy {
             if check_for_uaf(tcx, body, flow, term_location, terminator.source_info.span, src_local, dst_local, &mut findings) {
                 continue;
             }
+            // Suppress audit noise when both pointers are live raw-owned memory —
+            // the caller explicitly manages these allocations (from into_raw).
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let src_owned = src_local.map_or(false, |l| state.ptr_is_raw_owned(l));
+                let dst_owned = dst_local.map_or(false, |l| state.ptr_is_raw_owned(l));
+                if src_owned || dst_owned {
+                    continue;
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "ptr_copy",
