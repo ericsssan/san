@@ -1,13 +1,16 @@
 /// Flow-sensitive ownership protocol checker.
 ///
-/// Detects intra-procedural ownership violations that the call-site checkers
+/// Detects ownership violations that the call-site checkers
 /// (`into_raw`, `box_from_raw`) cannot see:
 ///
 /// 1. **Double-free**: `Box::from_raw` (or equivalent) called on a pointer that was
 ///    already reconstituted on the current control-flow path.
 /// 2. **Conditional double-free**: `from_raw` called when the pointer may have been
 ///    reconstituted on one branch but not another (join state = MaybeFreed).
-/// 3. **Leak**: function returns with a `RawOwned` pointer that was never passed to
+/// 3. **Cross-function double-free**: a helper function with a
+///    `ParamHeapEffect::Reconstituted` summary reconstitutes a pointer that was
+///    already reconstituted — e.g., calling `consume_raw(ptr)` twice.
+/// 4. **Leak**: function returns with a `RawOwned` pointer that was never passed to
 ///    `from_raw`, `mem::forget`, or any function that could consume it.
 ///
 /// The analysis uses allocation-site abstraction: each `into_raw` call site
