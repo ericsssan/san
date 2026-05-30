@@ -22,7 +22,9 @@
 ///
 /// Seen in: custom arena allocators, intrusive data structures, and any crate
 /// that passes NonNull pointers across function boundaries.
+use crate::analysis::state::FreedKind;
 use crate::analysis::transfer::first_arg_base_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -77,9 +79,22 @@ impl Checker for NonNullDeref {
                 continue;
             };
 
-            // Suppress if flow proves this pointer came from a live into_raw (still valid).
+            // Flow-sensitive checks: detect UAF and suppress valid patterns.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_base_local(args) {
+                    // UAF: as_ref/as_mut on a pointer whose allocation was already freed.
+                    match state.freed_kind(ptr_local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                    // Suppress the generic warning when the pointer is still live and owned.
                     if state.ptr_is_raw_owned(ptr_local) {
                         continue;
                     }

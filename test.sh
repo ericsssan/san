@@ -76,6 +76,7 @@ declare -A EXPECTED=(
     [unsafe_fn_ptr]="unsafe_fn_ptr"
     [unsafe_fn_call]="unsafe_fn_call"
     [use_after_free]="use_after_free"
+    [nonnull_uaf]="use_after_free"
     [cross_fn_double_free]="use_after_free"
     [xcrate_buffer_uaf]="use_after_free"
     [fnptr_uaf]="use_after_free"
