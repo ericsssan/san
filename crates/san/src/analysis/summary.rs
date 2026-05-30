@@ -149,26 +149,22 @@ pub fn extract_summary<'tcx>(
     });
 
     // If the return value is a raw pointer derived from a raw-pointer parameter
-    // (provenance-preserving: ptr::cast, ptr::add, NonNull::cast, etc.), record it.
-    // Propagates `points_to` at call sites so ownership tracking threads through.
-    // Does NOT propagate `owner_alias` — this is pointer arithmetic, not an accessor.
-    let returns_ptr_of_param = if returns_alias_of_param.is_none() {
-        // Only detect the raw-ptr-pass-through case when there is no owner_alias match,
-        // to avoid double-counting functions that are both an accessor and a pointer op.
-        exit_state.objects_for(return_local).find_map(|id| {
-            if id.0 >= SUMMARY_BASE {
-                // Object was seeded by summary_initial_state for a raw-pointer param.
-                let param_idx = (id.0 - SUMMARY_BASE) as usize;
-                (param_idx < body.arg_count).then_some(param_idx)
-            } else {
-                // Legacy path: ObjectId matching a param-local index (rarely used).
-                let k = id.0 as usize;
-                (k >= 1 && k <= body.arg_count).then(|| k - 1)
-            }
-        })
-    } else {
-        None
-    };
+    // (provenance-preserving: ptr::cast, ptr::add, NonNull::cast, Clone-style copy, etc.),
+    // record it.  Propagates `points_to` at call sites so ownership tracking threads
+    // through.  Does NOT propagate `owner_alias` — that is the job of returns_alias_of_param.
+    // Both fields can be set simultaneously (e.g. Clone: the returned struct both aliases
+    // the input's buffer AND carries its raw-pointer ownership tracking).
+    let returns_ptr_of_param = exit_state.objects_for(return_local).find_map(|id| {
+        if id.0 >= SUMMARY_BASE {
+            // Object was seeded by summary_initial_state for a raw-pointer param.
+            let param_idx = (id.0 - SUMMARY_BASE) as usize;
+            (param_idx < body.arg_count).then_some(param_idx)
+        } else {
+            // Legacy path: ObjectId matching a param-local index (rarely used).
+            let k = id.0 as usize;
+            (k >= 1 && k <= body.arg_count).then(|| k - 1)
+        }
+    });
 
     // A parameter whose buffer was reallocated anywhere in the body (tracked in
     // `realloced_params`) yields a `reallocs_param` effect — propagated up
@@ -252,6 +248,19 @@ pub fn apply_fn_summary<'tcx>(
             };
             for owner in owners {
                 state.set_owner_alias(dest, owner);
+            }
+            // For non-raw-pointer destinations (e.g. Clone returning a struct that
+            // copies a raw-pointer field), propagate points_to from the reference arg
+            // so that ownership tracking flows into the returned struct. Raw-pointer
+            // returns (e.g. `as_mut_ptr`) are already tracked via owner_alias and
+            // returns_ptr_of_param; propagating here would cause FPs in those cases.
+            let dest_ty = body.local_decls[dest].ty;
+            if !matches!(dest_ty.kind(), rustc_middle::ty::TyKind::RawPtr(..)) {
+                if let Some(objs) = state.points_to.get(&arg).cloned() {
+                    if !objs.is_empty() {
+                        state.points_to.insert(dest, objs);
+                    }
+                }
             }
         }
     }

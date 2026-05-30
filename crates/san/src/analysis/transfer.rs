@@ -31,8 +31,23 @@ pub fn apply_statement<'tcx>(
     state.invalidate_owner(dst.local);
 
     // Store into projection (field/deref) → escape any tracked source local.
+    // Exception: field writes to the return place (`_0.field = ...`, no Deref) are
+    // common in optimized MIR for Clone-style bodies. Propagate the source's
+    // points_to into _0 so summary extraction sees SUMMARY_BASE objects there.
     if !dst.projection.is_empty() {
-        if let Some(src) = rvalue_local(rvalue) {
+        let is_return_place = dst.local.as_usize() == 0;
+        let has_deref = dst.projection.iter().any(|e| matches!(e, ProjectionElem::Deref));
+        if is_return_place && !has_deref {
+            if let Some(src_local) = rvalue_local(rvalue) {
+                if let Some(objs) = state.points_to.get(&src_local).cloned() {
+                    if !objs.is_empty() {
+                        state.points_to.entry(Local::from_usize(0))
+                            .or_default()
+                            .extend(objs);
+                    }
+                }
+            }
+        } else if let Some(src) = rvalue_local(rvalue) {
             state.escape_local(src);
         }
         return;
@@ -165,13 +180,51 @@ pub fn apply_statement<'tcx>(
         // Propagate the base local's points_to so that `from_raw(w.ptr)` can reconstitute
         // an object tracked on `w` — otherwise the field copy loses the tracking and
         // the object stays RawOwned at the function's Return, triggering a spurious leak.
+        //
+        // Also covers `dst = (*ref_to_struct).field` — a single leading Deref followed
+        // by field projections only (no nested Deref).  This lets Clone::clone propagate
+        // the caller's raw-pointer tracking through `self.field` reads so that the clone
+        // summary captures `returns_ptr_of_param`, enabling double-free detection when
+        // both original and clone are consumed via Box::from_raw in the same body.
         Rvalue::Use(Operand::Copy(src) | Operand::Move(src), _)
             if !src.projection.is_empty()
-                && !src.projection.iter().any(|e| matches!(e, ProjectionElem::Deref)) =>
+                && {
+                    let mut proj = src.projection.iter();
+                    // Allow an optional single leading Deref (reference through &T),
+                    // then require all remaining elements to be non-Deref field/index.
+                    if matches!(proj.next(), Some(ProjectionElem::Deref)) {
+                        proj.all(|e| !matches!(e, ProjectionElem::Deref))
+                    } else {
+                        // No Deref at all — already handled; allow if no Deref anywhere.
+                        src.projection.iter().all(|e| !matches!(e, ProjectionElem::Deref))
+                    }
+                } =>
         {
             let src_base = src.local;
             if let Some(objs) = state.points_to.get(&src_base).cloned() {
                 state.points_to.insert(dst_local, objs);
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
+        // Reference creation `_ref = &_struct` where `_struct` has raw-pointer tracking.
+        // Propagate points_to from the referent to the reference local so that
+        // `returns_ptr_of_param` summaries work when a method takes `&self` and the caller
+        // passes `&p` — the reference argument carries the struct's tracking, allowing
+        // Clone-style aliases to be detected (e.g., metacall RUSTSEC-2026-0139 shape).
+        Rvalue::Ref(_, _, place) if place.projection.is_empty() => {
+            if let Some(objs) = state.points_to.get(&place.local).cloned() {
+                if !objs.is_empty() {
+                    state.points_to.insert(dst_local, objs);
+                } else {
+                    state.points_to.remove(&dst_local);
+                }
             } else {
                 state.points_to.remove(&dst_local);
             }
@@ -316,9 +369,36 @@ pub fn apply_terminator<'tcx>(
         TerminatorKind::Call { func, args, destination, .. } => {
             // Resolve the callee: a direct fn item, or an indirect call through a
             // fn pointer whose reified target we tracked (vtable/fn-ptr resolution).
-            let callee = func.const_fn_def().map(|(id, _)| id).or_else(|| {
-                operand_local(func).and_then(|l| state.fn_ptr_targets.get(&l).copied())
-            });
+            // For trait method calls (e.g. `<SharedPtr as Clone>::clone`), MIR stores the
+            // TRAIT method's def_id with substitutions.  Our summary map keys on the
+            // concrete IMPL's def_id, so we resolve the instance first.
+            let callee = func.const_fn_def()
+                .map(|(id, substs)| {
+                    use rustc_middle::ty::{Instance, InstanceKind, TypingEnv};
+                    // Trait method calls use the TRAIT's def_id in MIR; our summary map
+                    // keys on the concrete IMPL's def_id.  Only attempt resolution for
+                    // AssocFn items (trait methods) to avoid ICEs on generic contexts.
+                    // Use the caller's param_env so type normalization doesn't fail on
+                    // abstract type parameters.
+                    // Only resolve if this is a trait method (trait_of_assoc returns Some).
+                    let is_trait_method = tcx.trait_of_assoc(id).is_some();
+                    if is_trait_method {
+                        let typing_env = TypingEnv::post_analysis(tcx, body.source.def_id());
+                        Instance::try_resolve(tcx, typing_env, id, substs)
+                            .ok()
+                            .flatten()
+                            .and_then(|inst| match inst.def {
+                                InstanceKind::Item(did) => Some(did),
+                                _ => None,
+                            })
+                            .unwrap_or(id)
+                    } else {
+                        id
+                    }
+                })
+                .or_else(|| {
+                    operand_local(func).and_then(|l| state.fn_ptr_targets.get(&l).copied())
+                });
             // Reallocation invalidates outstanding pointers into the buffer:
             // `let p = self.v.as_mut_ptr(); self.v.push(x); use(p)`. When a
             // reallocating method is called on an owner, every pointer currently
