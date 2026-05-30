@@ -661,11 +661,6 @@ pub fn apply_terminator<'tcx>(
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
             } else if is_ptr_read(&path) {
-                // ptr::read / ptr::read_unaligned creates a bitwise copy of the
-                // pointed-to value. Propagate points_to from the source pointer so
-                // that if the result contains (or IS) a raw-owned allocation, the copy
-                // is tracked as a second owner — enabling double-free detection when
-                // both the original and the copy are later consumed via from_raw.
                 if let Some(src) = first_arg_local(args) {
                     if let Some(objs) = state.points_to.get(&src).cloned() {
                         if !objs.is_empty() {
@@ -688,6 +683,25 @@ pub fn apply_terminator<'tcx>(
             } else if let Some(summary) = summaries.get(&def_id) {
                 // Known local function: apply its pre-computed interprocedural summary.
                 apply_fn_summary(state, body, args, dest, bb, summary);
+                // For provenance-preserving wrapper functions (NonNull::as_ptr, ptr::cast, etc.)
+                // that have a computed summary, the summary may not set returns_ptr_of_param
+                // (e.g. because self: NonNull<T> is not seeded as a raw-ptr param).
+                // Apply the is_owned_buffer_accessor heuristic as a fallback to recover
+                // points_to tracking that the summary cleared.
+                if crate::is_owned_buffer_accessor(&path) && !state.points_to.contains_key(&dest) {
+                    if let Some(arg0) = first_arg_local(args) {
+                        let arg0_pts = state.points_to.get(&arg0).cloned();
+                        if std::env::var_os("SAN_DBG2").is_some() && path.contains("as_ptr") {
+                            eprintln!("FALLBACK as_ptr in {:?} arg0={:?} pts={:?}",
+                                tcx.def_path_str(body.source.def_id()), arg0, arg0_pts);
+                        }
+                        if let Some(objs) = arg0_pts {
+                            if !objs.is_empty() {
+                                state.points_to.insert(dest, objs);
+                            }
+                        }
+                    }
+                }
                 state.init.remove(&dest);
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);

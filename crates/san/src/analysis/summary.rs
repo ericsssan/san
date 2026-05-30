@@ -239,10 +239,26 @@ pub fn apply_fn_summary<'tcx>(
     state.owner_alias.remove(&dest);
     if let Some(n) = summary.returns_alias_of_param {
         if let Some(arg) = nth_arg_local(args, n) {
-            let owners: Vec<Local> = if let Some(set) = state.owner_alias.get(&arg) {
-                set.iter().copied().collect()
-            } else if crate::analysis::transfer::is_reference_param(body, arg) {
+            // Only propagate owner_alias when the argument is a reference or raw-pointer
+            // type. Struct-typed wrappers (e.g. NonNull<T> passed by value) may
+            // transitively carry owner_alias from field extractions, but propagating that
+            // through a function like NonNull::as_ptr causes FPs: the callee is just
+            // unwrapping the pointer, not providing a persistent accessor to the owner's
+            // buffer. True accessor functions (Vec::as_mut_ptr, triple_mut, etc.) always
+            // take &[mut] self — a reference type — so the guard does not miss them.
+            let arg_ty = body.local_decls[arg].ty;
+            let arg_is_ref_or_ptr = matches!(
+                arg_ty.kind(),
+                rustc_middle::ty::TyKind::Ref(..) | rustc_middle::ty::TyKind::RawPtr(..)
+            );
+            let owners: Vec<Local> = if crate::analysis::transfer::is_reference_param(body, arg) {
                 vec![arg]
+            } else if arg_is_ref_or_ptr {
+                if let Some(set) = state.owner_alias.get(&arg) {
+                    set.iter().copied().collect()
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             };
