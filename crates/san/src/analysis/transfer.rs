@@ -625,11 +625,25 @@ pub fn apply_terminator<'tcx>(
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
             } else if is_maybe_uninit_assume_init(&path) {
-                // assume_init consumes the MaybeUninit<T> by value — clear its init tracking.
+                // assume_init / assume_init_read: extract the inner value from MaybeUninit.
+                // Clear init tracking on the source (the MaybeUninit is consumed / read).
+                // Propagate points_to from src to dest so ownership tracks through: two
+                // assume_init calls on the same MaybeUninit<*mut T> yield two locals
+                // pointing to the same allocation, enabling double-free detection.
                 if let Some(src) = first_arg_local(args) {
                     state.init.remove(&src);
+                    if let Some(objs) = state.points_to.get(&src).cloned() {
+                        if !objs.is_empty() {
+                            state.points_to.insert(dest, objs);
+                        } else {
+                            state.points_to.remove(&dest);
+                        }
+                    } else {
+                        state.points_to.remove(&dest);
+                    }
+                } else {
+                    state.points_to.remove(&dest);
                 }
-                state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
                 state.init.remove(&dest);
                 state.buf_written.remove(&dest);
@@ -637,11 +651,24 @@ pub fn apply_terminator<'tcx>(
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
             } else if is_maybe_uninit_init(&path) {
-                // MaybeUninit::new(val), MaybeUninit::zeroed(), or MaybeUninit::write(val) —
-                // the destination is provably initialized.
+                // MaybeUninit::new(val): wraps `val` in a MaybeUninit — propagate points_to
+                // so ownership of raw pointers inside tracks through the wrapper.
+                // Also marks the destination as initialized.
+                if let Some(src) = first_arg_local(args) {
+                    if let Some(objs) = state.points_to.get(&src).cloned() {
+                        if !objs.is_empty() {
+                            state.points_to.insert(dest, objs);
+                        } else {
+                            state.points_to.remove(&dest);
+                        }
+                    } else {
+                        state.points_to.remove(&dest);
+                    }
+                } else {
+                    state.points_to.remove(&dest);
+                }
                 state.init.insert(dest, InitState::Initialized);
                 state.buf_written.remove(&dest);
-                state.points_to.remove(&dest);
                 state.local_proto.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
