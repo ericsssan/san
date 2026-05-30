@@ -1,0 +1,5 @@
+[package]
+name = "manually_drop_double_free"
+version = "0.1.0"
+edition = "2024"
+[workspace]

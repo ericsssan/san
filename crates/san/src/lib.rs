@@ -350,8 +350,8 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
                         || path.contains("mut_ptr")
                         || path.contains("NonNull"));
                 // NonNull::new_unchecked / NonNull::new wrap a raw pointer in a NonNull;
-                // the raw-ownership tracking must survive so returning the NonNull or a
-                // struct containing it is not falsely flagged as a memory leak.
+                // raw-ownership tracking must survive so returning the NonNull or a struct
+                // containing it is not falsely flagged as a memory leak.
                 let is_nonnull_wrap = path.contains("NonNull")
                     && (path.ends_with("::new_unchecked") || path.ends_with("::new"));
                 if !is_ptr_cast && !is_nonnull_wrap {

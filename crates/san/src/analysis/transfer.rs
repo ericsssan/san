@@ -1094,6 +1094,14 @@ pub fn is_ptr_read(path: &str) -> bool {
     path.ends_with("ptr::read") || path.ends_with("ptr::read_unaligned")
         || ((path.contains("const_ptr") || path.contains("mut_ptr") || path.contains("NonNull"))
             && (path.ends_with("::read") || path.ends_with("::read_unaligned")))
+        // ManuallyDrop::new wraps a value without consuming its raw-pointer provenance;
+        // ::take and ::into_inner are bitwise copies of the inner value — same aliasing
+        // semantics as ptr::read. Two into_inner/take calls yield two owners of the same
+        // allocation. We propagate points_to for all three so ownership tracks through.
+        || (path.contains("ManuallyDrop")
+            && (path.ends_with("::new")
+                || path.ends_with("::take")
+                || path.ends_with("::into_inner")))
 }
 
 pub fn is_epoch_pin(path: &str) -> bool {
