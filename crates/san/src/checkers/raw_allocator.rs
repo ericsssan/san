@@ -18,6 +18,9 @@
 ///
 /// Seen in: RUSTSEC-2022-0070 (secp256k1), custom arena allocators, and
 /// any crate implementing its own memory management layer.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -25,12 +28,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct RawAllocator;
 
 impl Checker for RawAllocator {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -56,6 +59,29 @@ impl Checker for RawAllocator {
             } else {
                 continue;
             };
+
+            // For dealloc: detect UAF if the pointer was already freed.
+            if fn_name == "dealloc" {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(ptr_local) = first_arg_local(args) {
+                        match state.freed_kind(ptr_local) {
+                            FreedKind::Definite => {
+                                findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                                continue;
+                            }
+                            FreedKind::Potential => {
+                                findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                                continue;
+                            }
+                            FreedKind::NotFreed => {}
+                        }
+                        // Suppress if the pointer is still live-owned (valid for dealloc).
+                        if state.ptr_is_raw_owned(ptr_local) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "raw_allocator",

@@ -216,7 +216,9 @@ fn is_drop_method<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> bool {
 }
 
 fn from_raw_short(path: &str) -> &str {
-    if path.contains("Box") {
+    if path.ends_with("dealloc") {
+        "alloc::dealloc"
+    } else if path.contains("Box") {
         "Box::from_raw"
     } else if path.contains("Arc") {
         "Arc::from_raw"
