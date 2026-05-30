@@ -236,11 +236,20 @@ pub fn is_owned_buffer_accessor(path: &str) -> bool {
             || path.contains("::cast"));
     let slice_build = path.ends_with("slice::from_raw_parts")
         || path.ends_with("slice::from_raw_parts_mut");
+    // ptr::from_raw_parts / from_raw_parts_mut: assemble a fat (wide) pointer from a
+    // thin data pointer + metadata. The data pointer's allocation identity is preserved
+    // in the fat pointer — propagating points_to lets freed_kind fire on trait-object or
+    // slice pointers built from stale thin pointers.
+    // ptr::with_metadata_of(ptr, meta): copies ptr's address + meta's metadata; identity
+    // tracks ptr (arg0), not meta.
+    let fat_ptr_build = path.ends_with("ptr::from_raw_parts")
+        || path.ends_with("ptr::from_raw_parts_mut")
+        || path.ends_with("ptr::with_metadata_of");
     // RawWaker::new(data, vtable) wraps a raw data pointer into an opaque struct;
     // propagating the data pointer's points_to through to the RawWaker enables
     // freed_kind detection when the waker is constructed from a freed pointer.
     let raw_waker = path.ends_with("RawWaker::new");
-    buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build || raw_waker
+    buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build || fat_ptr_build || raw_waker
 }
 
 pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
