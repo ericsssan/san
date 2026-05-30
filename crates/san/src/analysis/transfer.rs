@@ -890,6 +890,8 @@ pub fn is_reallocating_method(path: &str) -> bool {
         || path.ends_with("::extend_from_slice")
         || path.ends_with("::resize")
         || path.ends_with("::resize_with")
+        || path.ends_with("::extend_from_within")
+        || path.ends_with("::insert_str")
 }
 
 /// Recompute `owner_alias[dst]` from the assigned rvalue. A pointer aliases an
