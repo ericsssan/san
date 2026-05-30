@@ -23,6 +23,9 @@
 ///
 /// RustSec: pattern appears in RUSTSEC-2021-0019 (abomonation) and custom
 /// serialization crates that reconstruct strings from raw allocations.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -30,12 +33,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct StringFromRawParts;
 
 impl Checker for StringFromRawParts {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -51,6 +54,27 @@ impl Checker for StringFromRawParts {
             } else {
                 "String::from_raw_parts"
             };
+
+            // Suppress when flow is tracking this pointer (from a local into_raw).
+            // OwnershipProtocol handles the precise intra-procedural analysis.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg_local) = first_arg_local(args) {
+                    match state.freed_kind(arg_local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                    if state.objects_for(arg_local).next().is_some() {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "string_from_raw_parts",
