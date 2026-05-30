@@ -15,6 +15,9 @@
 ///
 /// RustSec: appears in RUSTSEC-2021-0079 and multiple FFI boundary crates
 /// that wrap C APIs returning nullable pointers.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -22,12 +25,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct NonNullNewUnchecked;
 
 impl Checker for NonNullNewUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -35,6 +38,27 @@ impl Checker for NonNullNewUnchecked {
                 && !path.ends_with("NonNull::new_unchecked")
             {
                 continue;
+            }
+
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(ptr_local) = first_arg_local(args) {
+                    match state.freed_kind(ptr_local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                    // Suppress when the pointer provably came from into_raw in this
+                    // function — it is non-null by construction.
+                    if state.ptr_is_raw_owned(ptr_local) {
+                        continue;
+                    }
+                }
             }
 
             findings.push(Finding {
