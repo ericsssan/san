@@ -213,12 +213,51 @@ pub fn apply_statement<'tcx>(
             state.ge_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
         }
-        // Reference creation `_ref = &_struct` where `_struct` has raw-pointer tracking.
-        // Propagate points_to from the referent to the reference local so that
-        // `returns_ptr_of_param` summaries work when a method takes `&self` and the caller
-        // passes `&p` — the reference argument carries the struct's tracking, allowing
-        // Clone-style aliases to be detected (e.g., metacall RUSTSEC-2026-0139 shape).
+        // Reference / raw-pointer creation (`_ref = &_struct` or `_ptr = &raw const (*ref)`)
+        // where the base local carries raw-pointer tracking. Propagate points_to so that
+        // call arguments built from these rvalues (e.g. `ptr::read(&original)`,
+        // Clone's `&self`) carry the struct's allocation tracking into the callee.
         Rvalue::Ref(_, _, place) if place.projection.is_empty() => {
+            if let Some(objs) = state.points_to.get(&place.local).cloned() {
+                if !objs.is_empty() {
+                    state.points_to.insert(dst_local, objs);
+                } else {
+                    state.points_to.remove(&dst_local);
+                }
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
+        // `&raw const (*ref_local)` / `&raw mut (*ref_local)` — a raw-pointer address-of with
+        // a single leading Deref (common in ptr::read call sites and FFI glue).
+        // The result points to the same allocation as the base reference.
+        Rvalue::RawPtr(_, place)
+            if matches!(place.projection.as_ref(), [ProjectionElem::Deref]) =>
+        {
+            if let Some(objs) = state.points_to.get(&place.local).cloned() {
+                if !objs.is_empty() {
+                    state.points_to.insert(dst_local, objs);
+                } else {
+                    state.points_to.remove(&dst_local);
+                }
+            } else {
+                state.points_to.remove(&dst_local);
+            }
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+        }
+        // `&raw const local` — direct raw address-of without Deref (no-projection case).
+        Rvalue::RawPtr(_, place) if place.projection.is_empty() => {
             if let Some(objs) = state.points_to.get(&place.local).cloned() {
                 if !objs.is_empty() {
                     state.points_to.insert(dst_local, objs);
@@ -621,6 +660,31 @@ pub fn apply_terminator<'tcx>(
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
                 state.bounded.remove(&dest);
+            } else if is_ptr_read(&path) {
+                // ptr::read / ptr::read_unaligned creates a bitwise copy of the
+                // pointed-to value. Propagate points_to from the source pointer so
+                // that if the result contains (or IS) a raw-owned allocation, the copy
+                // is tracked as a second owner — enabling double-free detection when
+                // both the original and the copy are later consumed via from_raw.
+                if let Some(src) = first_arg_local(args) {
+                    if let Some(objs) = state.points_to.get(&src).cloned() {
+                        if !objs.is_empty() {
+                            state.points_to.insert(dest, objs);
+                        } else {
+                            state.points_to.remove(&dest);
+                        }
+                    } else {
+                        state.points_to.remove(&dest);
+                    }
+                } else {
+                    state.points_to.remove(&dest);
+                }
+                state.local_proto.remove(&dest);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
+                state.lt_facts.remove(&dest);
+                state.ge_facts.remove(&dest);
+                state.bounded.remove(&dest);
             } else if let Some(summary) = summaries.get(&def_id) {
                 // Known local function: apply its pre-computed interprocedural summary.
                 apply_fn_summary(state, body, args, dest, bb, summary);
@@ -1007,6 +1071,15 @@ pub fn is_from_raw(path: &str) -> bool {
 
 pub fn is_mem_forget(path: &str) -> bool {
     matches!(path, "std::mem::forget" | "core::mem::forget")
+}
+
+/// Matches `ptr::read`, `ptr::read_unaligned`, and the inherent method forms on
+/// `*const T`, `*mut T`, and `NonNull<T>`. Excludes `read_volatile` — it is used
+/// for hardware I/O and not for ownership-transfer patterns.
+pub fn is_ptr_read(path: &str) -> bool {
+    path.ends_with("ptr::read") || path.ends_with("ptr::read_unaligned")
+        || ((path.contains("const_ptr") || path.contains("mut_ptr") || path.contains("NonNull"))
+            && (path.ends_with("::read") || path.ends_with("::read_unaligned")))
 }
 
 pub fn is_epoch_pin(path: &str) -> bool {
