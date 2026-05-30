@@ -216,6 +216,8 @@ fn from_raw_short(path: &str) -> &str {
         "Rc::from_raw"
     } else if path.contains("Vec") {
         "Vec::from_raw_parts"
+    } else if path.contains("CString") {
+        "CString::from_raw"
     } else {
         "from_raw"
     }
