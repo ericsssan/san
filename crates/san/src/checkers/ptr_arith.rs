@@ -28,7 +28,9 @@
 /// Real-world: RUSTSEC-2026-0133 (auto_vec), RUSTSEC-2022-0079 (elf_rs),
 /// RUSTSEC-2025-0106 (orx-pinned-vec) — all involved `sub` going before the
 /// start of the allocation.
+use crate::analysis::state::FreedKind;
 use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -139,9 +141,19 @@ impl Checker for PtrArith {
                 continue;
             };
 
-            // Suppress if flow tracks this pointer as coming from a live into_raw (still valid)
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(ptr_local) = first_arg_local(args) {
+                    match state.freed_kind(ptr_local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
                     if state.ptr_is_raw_owned(ptr_local) {
                         continue;
                     }
