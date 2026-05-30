@@ -18,24 +18,50 @@
 /// (partially-initialized dst is UB if further used after an earlier panic).
 ///
 /// Stable since Rust 1.81.0.
+use crate::analysis::state::FreedKind;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct CloneToUninitCall;
 
 impl Checker for CloneToUninitCall {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
             if !path.ends_with("::clone_to_uninit") {
                 continue;
+            }
+
+            // clone_to_uninit(&self, dst: *mut u8) — dst is args[1].
+            let dst_local = args.get(1).and_then(|a| match &a.node {
+                Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                _ => None,
+            });
+
+            if let (Some(state), Some(dst)) = (flow.state_before_terminator(tcx, body, bb), dst_local) {
+                match state.freed_kind(dst) {
+                    FreedKind::Definite => {
+                        findings.push(uaf_finding(terminator.source_info.span, "write", false));
+                        continue;
+                    }
+                    FreedKind::Potential => {
+                        findings.push(uaf_finding(terminator.source_info.span, "write", true));
+                        continue;
+                    }
+                    FreedKind::NotFreed => {}
+                }
+                // Suppress audit noise for explicitly managed raw memory.
+                if state.ptr_is_raw_owned(dst) {
+                    continue;
+                }
             }
 
             findings.push(Finding {

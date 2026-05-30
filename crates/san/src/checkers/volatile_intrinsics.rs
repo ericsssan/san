@@ -33,19 +33,22 @@
 ///   • Trusting that `volatile_set_memory(key_buf, 0, len)` securely wipes a key
 ///     (the compiler or CPU may reorder or elide the write)
 ///   • Misaligned pointers for types with alignment > 1 byte
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct VolatileIntrinsics;
 
 impl Checker for VolatileIntrinsics {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -109,6 +112,49 @@ impl Checker for VolatileIntrinsics {
             } else {
                 continue;
             };
+
+            // For volatile ops, args[0] is the primary pointer (src or dst).
+            // Copy variants also have a second pointer at args[1].
+            let is_copy = path.ends_with("volatile_copy_nonoverlapping_memory")
+                || path.ends_with("volatile_copy_memory");
+            let is_load = path.ends_with("volatile_load") || path.ends_with("unaligned_volatile_load");
+            let access = if is_load { "read" } else { "write" };
+
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let ptr0 = first_arg_local(args);
+                let ptr1 = if is_copy {
+                    args.get(1).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    })
+                } else {
+                    None
+                };
+
+                let mut uaf_found = false;
+                for (ptr_opt, acc) in [(ptr0, access), (ptr1, "read")] {
+                    let Some(ptr) = ptr_opt else { continue };
+                    match state.freed_kind(ptr) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, acc, false));
+                            uaf_found = true;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, acc, true));
+                            uaf_found = true;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+                if uaf_found { continue; }
+
+                // Suppress audit noise when the primary pointer is live raw-owned memory.
+                if let Some(p0) = ptr0 {
+                    if state.ptr_is_raw_owned(p0) {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "volatile_intrinsics",
