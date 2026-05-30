@@ -47,12 +47,6 @@ impl Checker for CStringAsPtr {
                      temporary (`CString::new(...).unwrap().as_ptr()`), the CString is \
                      dropped at the semicolon and the pointer is immediately dangling",
                 )
-            } else if path.ends_with("CString::into_raw") {
-                (
-                    "CString::into_raw",
-                    "leaks the CString — memory must be freed via `CString::from_raw` with \
-                     the same pointer exactly once; double-free or leak if misused",
-                )
             } else if path.ends_with("CString::from_vec_unchecked") {
                 (
                     "CString::from_vec_unchecked",
