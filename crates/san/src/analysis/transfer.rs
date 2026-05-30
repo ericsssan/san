@@ -1114,10 +1114,12 @@ pub fn is_from_raw(path: &str) -> bool {
         || path.ends_with("::from_raw_parts_in"))
         && (path.contains("::Vec::") || path.contains("::Vec<") || path.contains("::String::"));
     // Raw allocator dealloc: when a tracked pointer (from into_raw) is cast to *mut u8
-    // and passed to alloc::dealloc, that constitutes a free of the tracked allocation.
+    // and passed to alloc::dealloc or Allocator::deallocate, that constitutes a free
+    // of the tracked allocation.
     let raw_dealloc = matches!(path,
         "std::alloc::dealloc" | "core::alloc::dealloc" | "alloc::alloc::dealloc"
-        | "__rust_dealloc");
+        | "__rust_dealloc")
+        || path.ends_with("Allocator::deallocate");
     direct || from_raw_in || from_non_null || vec_parts || raw_dealloc
 }
 
