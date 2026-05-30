@@ -236,7 +236,11 @@ pub fn is_owned_buffer_accessor(path: &str) -> bool {
             || path.contains("::cast"));
     let slice_build = path.ends_with("slice::from_raw_parts")
         || path.ends_with("slice::from_raw_parts_mut");
-    buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build
+    // RawWaker::new(data, vtable) wraps a raw data pointer into an opaque struct;
+    // propagating the data pointer's points_to through to the RawWaker enables
+    // freed_kind detection when the waker is constructed from a freed pointer.
+    let raw_waker = path.ends_with("RawWaker::new");
+    buffer_accessor || nonnull_transform || raw_ptr_transform || slice_build || raw_waker
 }
 
 pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
