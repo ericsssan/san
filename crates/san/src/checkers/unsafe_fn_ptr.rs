@@ -20,20 +20,22 @@
 ///
 /// Note: direct calls to named `unsafe fn` functions are handled by the specific
 /// per-API checkers; this checker targets *indirect* calls through stored fn pointers.
+use crate::analysis::state::FreedKind;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_hir::Safety;
-use rustc_middle::mir::{Body, TerminatorKind};
-use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
+use rustc_middle::ty::{self, TyCtxt, TyKind};
 
 pub struct UnsafeFnPtr;
 
 impl Checker for UnsafeFnPtr {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
 
             // Direct calls (named functions) return Some from const_fn_def.
             // We only want indirect calls through stored fn pointers.
@@ -49,6 +51,32 @@ impl Checker for UnsafeFnPtr {
 
             if !is_unsafe_fn_ptr {
                 continue;
+            }
+
+            // If any raw-pointer argument was already freed, this is UAF.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let mut uaf_found = false;
+                for arg in args.iter() {
+                    let Some(local) = (match &arg.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    }) else { continue };
+                    if !matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..)) {
+                        continue;
+                    }
+                    match state.freed_kind(local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", false));
+                            uaf_found = true;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(terminator.source_info.span, "read", true));
+                            uaf_found = true;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+                if uaf_found { continue; }
             }
 
             findings.push(Finding {
