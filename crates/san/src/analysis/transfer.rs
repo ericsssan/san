@@ -1278,11 +1278,9 @@ pub fn is_ptr_write_to_first_arg(path: &str) -> bool {
         || path.ends_with("::write_unaligned")
         || path.ends_with("::write_bytes")
         || path.ends_with("::copy_to")
-        || path.ends_with("::copy_to_nonoverlapping");
-    // Global ptr::copy / ptr::copy_nonoverlapping (dst is arg[1], not arg[0]):
-    // we handle these here too but the buf_written logic applies to arg[0] only
-    // — for copy* the first arg is src. A separate global-fn path is needed
-    // for them; here we focus on inherent methods where dst IS self (arg[0]).
+        || path.ends_with("::copy_to_nonoverlapping")
+        || path.ends_with("::copy_from")            // dst = self
+        || path.ends_with("::copy_from_nonoverlapping"); // dst = self
     (is_raw_ptr || is_nonnull) && is_write
 }
 
