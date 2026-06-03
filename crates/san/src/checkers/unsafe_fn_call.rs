@@ -66,22 +66,23 @@ impl Checker for UnsafeFnCall {
                         Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
                         _ => None,
                     }) else { continue };
-                    if !matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..)) {
-                        continue;
-                    }
-                    match state.freed_kind(local) {
-                        FreedKind::Definite => {
-                            findings.push(uaf_finding(span, "read", false));
-                            uaf_found = true;
+                    // UAF escalation: only check raw-pointer typed args (freed_kind
+                    // is only meaningful for raw pointer locals).
+                    if matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..)) {
+                        match state.freed_kind(local) {
+                            FreedKind::Definite => {
+                                findings.push(uaf_finding(span, "read", false));
+                                uaf_found = true;
+                            }
+                            FreedKind::Potential => {
+                                findings.push(uaf_finding(span, "read", true));
+                                uaf_found = true;
+                            }
+                            FreedKind::NotFreed => {}
                         }
-                        FreedKind::Potential => {
-                            findings.push(uaf_finding(span, "read", true));
-                            uaf_found = true;
-                        }
-                        FreedKind::NotFreed => {}
                     }
-                    // Track if any raw-pointer arg is being tracked by flow — if so,
-                    // a specific checker (box_from_raw, ptr_read, etc.) will handle it.
+                    // Track if ANY arg (raw pointer OR wrapper like NonNull) is being
+                    // tracked by flow — if so, a specific checker will handle it.
                     if state.objects_for(local).next().is_some() {
                         any_tracked = true;
                     }
