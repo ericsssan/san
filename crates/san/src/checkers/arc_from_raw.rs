@@ -159,8 +159,24 @@ impl Checker for ArcFromRaw {
             // OwnershipProtocol handles the precise intra-procedural detection.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(arg_local) = first_arg_local(args) {
-                    if !matches!(state.freed_kind(arg_local), FreedKind::NotFreed) {
-                        continue;
+                    match state.freed_kind(arg_local) {
+                        FreedKind::Definite if !crate::analysis::transfer::is_from_raw(&path) => {
+                            // Non-reconstituting call on a freed pointer: escalate to UAF.
+                            // (from_raw calls are handled by OwnershipProtocol as double-free.)
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential if !crate::analysis::transfer::is_from_raw(&path) => {
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::Definite | FreedKind::Potential => {
+                            // from_raw on freed ptr: let OwnershipProtocol fire double-free.
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
                     }
                     if state.objects_for(arg_local).next().is_some() {
                         continue;
