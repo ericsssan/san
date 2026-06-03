@@ -54,10 +54,13 @@ impl Checker for UnsafeFnCall {
                 continue;
             }
 
+            let path = tcx.def_path_str(def_id);
+
             // If any raw-pointer argument was already freed, this is UAF — escalate
             // rather than emitting the generic unsafe-fn audit finding.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 let mut uaf_found = false;
+                let mut any_tracked = false;
                 for arg in args.iter() {
                     let Some(local) = (match &arg.node {
                         Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
@@ -77,11 +80,20 @@ impl Checker for UnsafeFnCall {
                         }
                         FreedKind::NotFreed => {}
                     }
+                    // Track if any raw-pointer arg is being tracked by flow — if so,
+                    // a specific checker (box_from_raw, ptr_read, etc.) will handle it.
+                    if state.objects_for(local).next().is_some() {
+                        any_tracked = true;
+                    }
                 }
                 if uaf_found { continue; }
+                // For from_raw calls on tracked pointers, the specific checker handles it;
+                // suppress here to avoid duplicate audit noise.
+                if any_tracked && crate::analysis::transfer::is_from_raw(&path) {
+                    continue;
+                }
             }
 
-            let path = tcx.def_path_str(def_id);
             findings.push(Finding {
                 rule_id: "unsafe_fn_call",
                 severity: Severity::Info,
