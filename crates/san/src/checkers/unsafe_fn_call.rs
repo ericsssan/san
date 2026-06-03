@@ -94,6 +94,7 @@ impl Checker for UnsafeFnCall {
                     && (crate::analysis::transfer::is_from_raw(&path)
                         || crate::analysis::transfer::is_ptr_read(&path)
                         || crate::analysis::transfer::is_raw_realloc(&path)
+                        || crate::analysis::transfer::is_ptr_write_to_first_arg(&path)
                         || crate::is_owned_buffer_accessor(&path))
                 {
                     continue;
