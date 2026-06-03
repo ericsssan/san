@@ -111,11 +111,29 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.ge_facts.remove(&dst_local);
             }
+            // Transfer le_facts: move src → dst, clear src.
+            if let Some(v) = state.le_facts.remove(&src_local) {
+                state.le_facts.insert(dst_local, v);
+            } else {
+                state.le_facts.remove(&dst_local);
+            }
+            // Transfer gt_facts: move src → dst, clear src.
+            if let Some(v) = state.gt_facts.remove(&src_local) {
+                state.gt_facts.insert(dst_local, v);
+            } else {
+                state.gt_facts.remove(&dst_local);
+            }
             // Transfer bounded: move src → dst, clear src.
             if state.bounded.remove(&src_local) {
                 state.bounded.insert(dst_local);
             } else {
                 state.bounded.remove(&dst_local);
+            }
+            // Transfer bounded_or_eq: move src → dst, clear src.
+            if state.bounded_or_eq.remove(&src_local) {
+                state.bounded_or_eq.insert(dst_local);
+            } else {
+                state.bounded_or_eq.remove(&dst_local);
             }
         }
         Rvalue::Use(Operand::Copy(src), _) if src.projection.is_empty() => {
@@ -168,11 +186,29 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.ge_facts.remove(&dst_local);
             }
+            // Copy le_facts: dst gets the same fact as src.
+            if let Some(v) = state.le_facts.get(&src_local).copied() {
+                state.le_facts.insert(dst_local, v);
+            } else {
+                state.le_facts.remove(&dst_local);
+            }
+            // Copy gt_facts: dst gets the same fact as src.
+            if let Some(v) = state.gt_facts.get(&src_local).copied() {
+                state.gt_facts.insert(dst_local, v);
+            } else {
+                state.gt_facts.remove(&dst_local);
+            }
             // Copy bounded: dst is bounded if src was bounded.
             if state.bounded.contains(&src_local) {
                 state.bounded.insert(dst_local);
             } else {
                 state.bounded.remove(&dst_local);
+            }
+            // Copy bounded_or_eq: dst is bounded_or_eq if src was.
+            if state.bounded_or_eq.contains(&src_local) {
+                state.bounded_or_eq.insert(dst_local);
+            } else {
+                state.bounded_or_eq.remove(&dst_local);
             }
         }
         // Field read: `dst = src.field` (or `dst = src.0` for tuples). dst.projection
@@ -211,7 +247,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         // Reference / raw-pointer creation (`_ref = &_struct` or `_ptr = &raw const (*ref)`)
         // where the base local carries raw-pointer tracking. Propagate points_to so that
@@ -232,7 +271,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         // `&raw const (*ref_local)` / `&raw mut (*ref_local)` — a raw-pointer address-of with
         // a single leading Deref (common in ptr::read call sites and FFI glue).
@@ -254,7 +296,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         // `&raw const local` — direct raw address-of without Deref (no-projection case).
         Rvalue::RawPtr(_, place) if place.projection.is_empty() => {
@@ -272,7 +317,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         // Aggregate struct/tuple/enum construction: if any operand carries raw-pointer
         // ownership tracking, propagate it to the aggregate so that returning a struct
@@ -300,7 +348,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         // Pointer-identity casts (PtrToPtr, Transmute) preserve the allocation
         // the pointer refers into — dst points to the same objects as src. This
@@ -323,7 +374,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         Rvalue::BinaryOp(op, operands) => {
             let (op1, _op2) = operands.as_ref();
@@ -347,6 +401,7 @@ pub fn apply_statement<'tcx>(
             state.init.remove(&dst_local);
             state.buf_written.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
             match op {
                 BinOp::Lt => {
                     if let Some(lhs) = operand_local(op1) {
@@ -355,6 +410,8 @@ pub fn apply_statement<'tcx>(
                         state.lt_facts.remove(&dst_local);
                     }
                     state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
                 }
                 BinOp::Ge => {
                     if let Some(lhs) = operand_local(op1) {
@@ -363,10 +420,34 @@ pub fn apply_statement<'tcx>(
                         state.ge_facts.remove(&dst_local);
                     }
                     state.lt_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                BinOp::Le => {
+                    if let Some(lhs) = operand_local(op1) {
+                        state.le_facts.insert(dst_local, lhs);
+                    } else {
+                        state.le_facts.remove(&dst_local);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                BinOp::Gt => {
+                    if let Some(lhs) = operand_local(op1) {
+                        state.gt_facts.insert(dst_local, lhs);
+                    } else {
+                        state.gt_facts.remove(&dst_local);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
                 }
                 _ => {
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
                 }
             }
         }
@@ -378,7 +459,10 @@ pub fn apply_statement<'tcx>(
             state.buf_written.remove(&dst_local);
             state.lt_facts.remove(&dst_local);
             state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
             // For a projected move, also clear the base local to prevent stale tracking.
             // E.g. `_dst = move _src.field` leaves `_src` tracked but field is gone.
             if let Rvalue::Use(Operand::Move(src), _) = rvalue {
@@ -389,7 +473,10 @@ pub fn apply_statement<'tcx>(
                     state.buf_written.remove(&src.local);
                     state.lt_facts.remove(&src.local);
                     state.ge_facts.remove(&src.local);
+                    state.le_facts.remove(&src.local);
+                    state.gt_facts.remove(&src.local);
                     state.bounded.remove(&src.local);
+                    state.bounded_or_eq.remove(&src.local);
                 }
             }
         }
@@ -776,14 +863,24 @@ pub fn apply_terminator<'tcx>(
                 if p.projection.is_empty() {
                     let cond_local = p.local;
                     if *expected {
-                        // assert(cond, true) — cond was proven true; if cond = lhs < rhs, lhs is bounded
+                        // assert(cond, true) — cond was proven true.
+                        // lhs < rhs → lhs is strictly bounded
                         if let Some(&lhs) = state.lt_facts.get(&cond_local) {
                             state.bounded.insert(lhs);
                         }
+                        // lhs <= rhs → lhs is bounded-or-equal
+                        if let Some(&lhs) = state.le_facts.get(&cond_local) {
+                            state.bounded_or_eq.insert(lhs);
+                        }
                     } else {
-                        // assert(cond, false) — cond was proven false; if cond = lhs >= rhs, lhs < rhs holds
+                        // assert(cond, false) — cond was proven false.
+                        // NOT (lhs >= rhs) → lhs < rhs → strictly bounded
                         if let Some(&lhs) = state.ge_facts.get(&cond_local) {
                             state.bounded.insert(lhs);
+                        }
+                        // NOT (lhs > rhs) → lhs <= rhs → bounded-or-equal
+                        if let Some(&lhs) = state.gt_facts.get(&cond_local) {
+                            state.bounded_or_eq.insert(lhs);
                         }
                     }
                 }
@@ -1114,7 +1211,11 @@ pub fn is_ptr_pure_read(path: &str) -> bool {
         || path.ends_with("::expose_provenance")
         || path.ends_with("::as_ptr")  // immutable ptr view — no ownership transfer
         || path.ends_with("::guaranteed_ne")
-        || path.ends_with("::guaranteed_eq");
+        || path.ends_with("::guaranteed_eq")
+        || path.ends_with("::align_offset")  // returns usize, no pointee access
+        || path.ends_with("::offset_from")   // computes pointer distance, no pointee access
+        || path.ends_with("::byte_offset_from")
+        || path.ends_with("::sub_ptr");  // unsigned offset_from variant
     (is_raw_ptr || is_nonnull) && is_predicate
 }
 

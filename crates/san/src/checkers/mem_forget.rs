@@ -27,8 +27,8 @@
 ///   1. No panic path exists between taking raw pointers and calling `forget`
 ///   2. The forgetting is paired with a corresponding ownership pickup elsewhere
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
+use rustc_middle::ty::{TyCtxt, TyKind};
 
 pub struct MemForget;
 
@@ -38,7 +38,7 @@ impl Checker for MemForget {
 
         for block_data in body.basic_blocks.iter() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -51,6 +51,17 @@ impl Checker for MemForget {
             } else {
                 continue;
             };
+
+            // mem::forget(*mut T) / (*const T) is a no-op — raw pointers don't implement
+            // Drop, so forgetting one has no effect and is not worth auditing.
+            if let Some(arg) = args.first() {
+                if let Operand::Move(p) | Operand::Copy(p) = &arg.node {
+                    let ty = body.local_decls[p.local].ty;
+                    if matches!(ty.kind(), TyKind::RawPtr(..) | TyKind::FnPtr(..)) {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "mem_forget",

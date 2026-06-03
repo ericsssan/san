@@ -26,12 +26,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct SplitAtUnchecked;
 
 impl Checker for SplitAtUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -53,6 +53,22 @@ impl Checker for SplitAtUnchecked {
             } else {
                 continue;
             };
+
+            // Suppress when mid is proven <= self.len() on all predecessor paths.
+            // split_at_unchecked(self, mid) — mid is args[1].
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(mid_local) = args.get(1).and_then(|a| {
+                    use rustc_middle::mir::Operand;
+                    match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    }
+                }) {
+                    if state.local_is_bounded_or_eq(mid_local) {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "split_at_unchecked",

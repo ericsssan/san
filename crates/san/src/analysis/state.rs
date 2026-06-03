@@ -34,8 +34,16 @@ pub struct BlockState {
     /// cmp_result_local → lhs_local: this comparison-result local holds (lhs >= something).
     /// Used for bounds range tracking. Join is UNION.
     pub ge_facts: HashMap<Local, Local>,
+    /// cmp_result_local → lhs_local: this comparison-result local holds (lhs <= something).
+    /// Used for bounds range tracking. Join is UNION.
+    pub le_facts: HashMap<Local, Local>,
+    /// cmp_result_local → lhs_local: this comparison-result local holds (lhs > something).
+    /// Used for bounds range tracking. Join is UNION.
+    pub gt_facts: HashMap<Local, Local>,
     /// Locals proven to be < some length (via Assert terminator). Join is INTERSECTION.
     pub bounded: HashSet<Local>,
+    /// Locals proven to be <= some length (via Assert terminator). Join is INTERSECTION.
+    pub bounded_or_eq: HashSet<Local>,
     /// pointer-local → set of *owner* locals whose interior allocation this
     /// pointer aliases. Established when a pointer is loaded from the interior of
     /// an owner (typically `&mut self`), directly or via a callee summarised as
@@ -164,6 +172,22 @@ impl BlockState {
             });
         }
 
+        // Join le_facts: UNION.
+        for (local, lhs) in &other.le_facts {
+            result.le_facts.entry(*local).or_insert_with(|| {
+                changed = true;
+                *lhs
+            });
+        }
+
+        // Join gt_facts: UNION.
+        for (local, lhs) in &other.gt_facts {
+            result.gt_facts.entry(*local).or_insert_with(|| {
+                changed = true;
+                *lhs
+            });
+        }
+
         // Join bounded: INTERSECTION — a local is only proven bounded on ALL paths.
         let new_bounded: HashSet<Local> = result
             .bounded
@@ -174,6 +198,18 @@ impl BlockState {
         if new_bounded != result.bounded {
             changed = true;
             result.bounded = new_bounded;
+        }
+
+        // Join bounded_or_eq: INTERSECTION.
+        let new_bounded_or_eq: HashSet<Local> = result
+            .bounded_or_eq
+            .iter()
+            .copied()
+            .filter(|l| other.bounded_or_eq.contains(l))
+            .collect();
+        if new_bounded_or_eq != result.bounded_or_eq {
+            changed = true;
+            result.bounded_or_eq = new_bounded_or_eq;
         }
 
         // Join owner_alias: UNION (may-alias) — a free is unsafe if the pointer
@@ -299,6 +335,13 @@ impl BlockState {
     /// length by an `Assert` terminator over a `Lt`/`Ge` comparison.
     pub fn local_is_bounded(&self, local: Local) -> bool {
         self.bounded.contains(&local)
+    }
+
+    /// Returns `true` if `local` was proven to be ≤ some value by an `Assert`
+    /// terminator over a `Le`/`Gt` comparison. Also returns `true` when
+    /// `local_is_bounded` is true (< implies <=).
+    pub fn local_is_bounded_or_eq(&self, local: Local) -> bool {
+        self.bounded.contains(&local) || self.bounded_or_eq.contains(&local)
     }
 
     /// Classifies whether using the pointer in `local` is a use-after-free.

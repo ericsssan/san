@@ -97,6 +97,11 @@ impl Checker for WakerFromRaw {
                         }
                         FreedKind::NotFreed => {}
                     }
+                    // Suppress when the data pointer is a live tracked raw-owned allocation
+                    // (the expected into_raw → Waker pattern). The vtable drop will free it.
+                    if state.ptr_is_raw_owned(raw_local) {
+                        continue;
+                    }
                 }
             }
 

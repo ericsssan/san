@@ -230,9 +230,15 @@ pub fn is_owned_buffer_accessor(path: &str) -> bool {
         && (path.ends_with("::offset")
             || path.ends_with("::add")
             || path.ends_with("::sub")
+            || path.ends_with("::byte_offset")
+            || path.ends_with("::byte_add")
+            || path.ends_with("::byte_sub")
             || path.ends_with("::wrapping_offset")
             || path.ends_with("::wrapping_add")
             || path.ends_with("::wrapping_sub")
+            || path.ends_with("::wrapping_byte_offset")
+            || path.ends_with("::wrapping_byte_add")
+            || path.ends_with("::wrapping_byte_sub")
             || path.contains("::cast"));
     let slice_build = path.ends_with("slice::from_raw_parts")
         || path.ends_with("slice::from_raw_parts_mut");
