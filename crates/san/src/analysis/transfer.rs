@@ -900,10 +900,19 @@ pub fn apply_terminator<'tcx>(
                     }
                     // Don't escape the source arg — it's being read, not consumed.
                 } else if is_ptr_write_to_first_arg(&path) {
-                    // ptr::write / write_bytes / copy_nonoverlapping write data through their
-                    // first (dst) argument but do NOT consume the pointer itself. Keep tracking
-                    // alive and set buf_written for any BufMut owner the dst pointer aliases.
+                    // ptr::write / write_bytes / copy_from write data through their
+                    // first (self/dst) argument but do NOT consume the pointer itself.
+                    // Keep tracking alive and set buf_written for any BufMut owner.
                     if let Some(dst_local) = first_arg_local(args) {
+                        let owners: Vec<Local> = state.owners_of(dst_local).collect();
+                        for owner in owners {
+                            state.buf_written.insert(owner);
+                        }
+                    }
+                } else if is_global_ptr_copy_to_second_arg(&path) {
+                    // Global ptr::copy(src, dst, count) and ptr::copy_nonoverlapping:
+                    // dst is arg[1] (not self). Set buf_written for dst's owners.
+                    if let Some(dst_local) = args.get(1).and_then(|a| operand_local(&a.node)) {
                         let owners: Vec<Local> = state.owners_of(dst_local).collect();
                         for owner in owners {
                             state.buf_written.insert(owner);
@@ -1266,6 +1275,15 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.ends_with("Allocator::allocate")
         || path.ends_with("Allocator::allocate_zeroed");
     (tail_matches && type_matches) || raw_alloc
+}
+
+/// Global `ptr::copy(src, dst, count)` and `ptr::copy_nonoverlapping(src, dst, count)`:
+/// dst is arg[1] (not arg[0]). We don't escape dst and mark buf owners written.
+pub fn is_global_ptr_copy_to_second_arg(path: &str) -> bool {
+    (path.ends_with("ptr::copy") || path.ends_with("ptr::copy_nonoverlapping"))
+        && !path.contains("const_ptr")
+        && !path.contains("mut_ptr")
+        && !path.contains("NonNull")
 }
 
 /// Functions that write through their first (dst) raw-pointer argument but do NOT
