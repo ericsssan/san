@@ -1,5 +1,6 @@
 /target
 fixtures/*/target/
+fixtures/*/mir_dump/
 .envrc
 
 # compiled exploration binaries and scratch files in repo root
