@@ -158,6 +158,7 @@ declare -A EXPECTED=(
     [flow_ownership_leak]="ownership_leak"
     [ownership_through_struct]="ownership_leak"
     [aliased_ptr_double_free]="ownership_double_free"
+    [alloc_double_free]="ownership_double_free"
     [ptr_read_double_free]="ownership_double_free"
     [manually_drop_double_free]="ownership_double_free"
     [maybeuninit_double_free]="ownership_double_free"

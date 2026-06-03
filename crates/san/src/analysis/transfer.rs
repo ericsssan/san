@@ -755,6 +755,9 @@ pub fn apply_terminator<'tcx>(
                         }
                     }
                     // Don't escape the source arg — it's being read, not consumed.
+                } else if is_ptr_pure_read(&path) {
+                    // Pure pointer reads (is_null, is_aligned, addr, etc.) don't consume
+                    // the pointer — skip escaping so tracked objects stay visible.
                 } else {
                     // Truly unknown call: escape tracked raw-pointer args, clear dest.
                     escape_raw_ptr_args(state, body, args);
@@ -1085,7 +1088,34 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.contains("::CString::")
         || path.contains("::CStr::")
         || path.contains("triomphe");
-    tail_matches && type_matches
+    // Raw allocator alloc: `alloc::alloc` / `alloc::alloc_zeroed` return a
+    // freshly-owned *mut u8 that must be freed via `alloc::dealloc` exactly once.
+    // Tracking these enables double-free and UAF detection for hand-rolled allocators.
+    let raw_alloc = matches!(path,
+        "std::alloc::alloc" | "core::alloc::alloc" | "alloc::alloc::alloc"
+        | "__rust_alloc"
+        | "std::alloc::alloc_zeroed" | "core::alloc::alloc_zeroed" | "alloc::alloc::alloc_zeroed"
+        | "__rust_alloc_zeroed")
+        || path.ends_with("Allocator::allocate")
+        || path.ends_with("Allocator::allocate_zeroed");
+    (tail_matches && type_matches) || raw_alloc
+}
+
+/// Pure reads on raw pointers that don't move ownership or affect validity.
+/// For these functions, we skip `escape_raw_ptr_args` so that the tracked
+/// heap state remains accurate after a null-check or address query.
+pub fn is_ptr_pure_read(path: &str) -> bool {
+    let is_raw_ptr = path.contains("const_ptr") || path.contains("mut_ptr");
+    let is_nonnull = path.contains("NonNull");
+    let is_predicate = path.ends_with("::is_null")
+        || path.ends_with("::is_aligned")
+        || path.ends_with("::is_aligned_to")
+        || path.ends_with("::addr")
+        || path.ends_with("::expose_provenance")
+        || path.ends_with("::as_ptr")  // immutable ptr view — no ownership transfer
+        || path.ends_with("::guaranteed_ne")
+        || path.ends_with("::guaranteed_eq");
+    (is_raw_ptr || is_nonnull) && is_predicate
 }
 
 pub fn is_from_raw(path: &str) -> bool {
