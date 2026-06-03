@@ -691,7 +691,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_mem_forget(&path) {
                 // Use base-local extraction so `mem::forget(container.field)` is handled.
                 if let Some(src) = first_arg_base_local(args) {
@@ -722,7 +725,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_epoch_pin(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
                 state.local_proto.entry(dest).or_default().insert(proto_id);
@@ -731,7 +737,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_lock_acquire(&path) {
                 let proto_id = ProtocolId(bb.index() as u32);
                 state.local_proto.entry(dest).or_default().insert(proto_id);
@@ -740,7 +749,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_maybe_uninit_assume_init(&path) {
                 // assume_init / assume_init_read: extract the inner value from MaybeUninit.
                 // Clear init tracking on the source (the MaybeUninit is consumed / read).
@@ -766,7 +778,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_maybe_uninit_init(&path) {
                 // MaybeUninit::new(val): wraps `val` in a MaybeUninit — propagate points_to
                 // so ownership of raw pointers inside tracks through the wrapper.
@@ -789,7 +804,10 @@ pub fn apply_terminator<'tcx>(
                 state.local_proto.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_buf_write(&path) {
                 // BufMut::put_slice / put_bytes / put — the self/buf argument has bytes written.
                 // Record that the first argument (the buf local) had bytes written to it.
@@ -803,7 +821,10 @@ pub fn apply_terminator<'tcx>(
                 state.local_proto.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_ptr_read(&path) {
                 if let Some(src) = first_arg_local(args) {
                     if let Some(objs) = state.points_to.get(&src).cloned() {
@@ -823,7 +844,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if let Some(summary) = summaries.get(&def_id) {
                 // Known local function: apply its pre-computed interprocedural summary.
                 apply_fn_summary(state, body, args, dest, bb, summary);
@@ -850,7 +874,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else {
                 // Unrecognized call: for known pointer-arithmetic / provenance-preserving
                 // functions (ptr::add, ptr::sub, ptr::offset, NonNull transforms), propagate
@@ -884,7 +911,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             }
         }
 
