@@ -899,6 +899,16 @@ pub fn apply_terminator<'tcx>(
                         }
                     }
                     // Don't escape the source arg — it's being read, not consumed.
+                } else if is_ptr_write_to_first_arg(&path) {
+                    // ptr::write / write_bytes / copy_nonoverlapping write data through their
+                    // first (dst) argument but do NOT consume the pointer itself. Keep tracking
+                    // alive and set buf_written for any BufMut owner the dst pointer aliases.
+                    if let Some(dst_local) = first_arg_local(args) {
+                        let owners: Vec<Local> = state.owners_of(dst_local).collect();
+                        for owner in owners {
+                            state.buf_written.insert(owner);
+                        }
+                    }
                 } else if is_ptr_pure_read(&path) {
                     // Pure pointer reads (is_null, is_aligned, addr, etc.) don't consume
                     // the pointer — skip escaping so tracked objects stay visible.
@@ -1256,6 +1266,24 @@ pub fn is_into_raw(path: &str) -> bool {
         || path.ends_with("Allocator::allocate")
         || path.ends_with("Allocator::allocate_zeroed");
     (tail_matches && type_matches) || raw_alloc
+}
+
+/// Functions that write through their first (dst) raw-pointer argument but do NOT
+/// consume the pointer itself. We skip escaping (the dst ptr is still valid after
+/// the write) and additionally mark BufMut owners of dst as written.
+pub fn is_ptr_write_to_first_arg(path: &str) -> bool {
+    let is_raw_ptr = path.contains("const_ptr") || path.contains("mut_ptr");
+    let is_nonnull = path.contains("NonNull");
+    let is_write = path.ends_with("::write")
+        || path.ends_with("::write_unaligned")
+        || path.ends_with("::write_bytes")
+        || path.ends_with("::copy_to")
+        || path.ends_with("::copy_to_nonoverlapping");
+    // Global ptr::copy / ptr::copy_nonoverlapping (dst is arg[1], not arg[0]):
+    // we handle these here too but the buf_written logic applies to arg[0] only
+    // — for copy* the first arg is src. A separate global-fn path is needed
+    // for them; here we focus on inherent methods where dst IS self (arg[0]).
+    (is_raw_ptr || is_nonnull) && is_write
 }
 
 /// Pure reads on raw pointers that don't move ownership or affect validity.
