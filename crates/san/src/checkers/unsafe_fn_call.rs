@@ -87,13 +87,13 @@ impl Checker for UnsafeFnCall {
                     }
                 }
                 if uaf_found { continue; }
-                // For from_raw, ptr-read, or realloc calls on tracked pointers, the
-                // specific checker (box_from_raw, ptr_read, raw_allocator) handles the
-                // lifecycle. Suppress the generic backstop to avoid duplicate audit noise.
+                // For calls on tracked pointers where a specific checker handles the
+                // lifecycle, suppress the generic backstop to avoid redundant audit noise.
                 if any_tracked
                     && (crate::analysis::transfer::is_from_raw(&path)
                         || crate::analysis::transfer::is_ptr_read(&path)
-                        || crate::analysis::transfer::is_raw_realloc(&path))
+                        || crate::analysis::transfer::is_raw_realloc(&path)
+                        || crate::is_owned_buffer_accessor(&path))
                 {
                     continue;
                 }
