@@ -1274,11 +1274,11 @@ pub fn is_into_raw(path: &str) -> bool {
 pub fn is_ptr_write_to_first_arg(path: &str) -> bool {
     let is_raw_ptr = path.contains("const_ptr") || path.contains("mut_ptr");
     let is_nonnull = path.contains("NonNull");
+    // Only include methods where self/first-arg IS the destination being written to.
+    // copy_to / copy_to_nonoverlapping: self is the SOURCE, not the destination — excluded.
     let is_write = path.ends_with("::write")
         || path.ends_with("::write_unaligned")
         || path.ends_with("::write_bytes")
-        || path.ends_with("::copy_to")
-        || path.ends_with("::copy_to_nonoverlapping")
         || path.ends_with("::copy_from")            // dst = self
         || path.ends_with("::copy_from_nonoverlapping"); // dst = self
     (is_raw_ptr || is_nonnull) && is_write
