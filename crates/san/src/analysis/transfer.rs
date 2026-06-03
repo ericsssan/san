@@ -614,7 +614,34 @@ pub fn apply_terminator<'tcx>(
             }
             let dest = destination.local;
 
-            if is_into_raw(&path) {
+            if is_raw_realloc(&path) {
+                // realloc(old_ptr, layout, new_size): the old pointer is consumed (like dealloc)
+                // and the return value is a fresh raw-owned allocation (like alloc).
+                // Keep points_to[old_ptr] so subsequent dealloc(old_ptr) is detected as a double-free.
+                let obj_id = ObjectId(bb.index() as u32);
+                if let Some(src) = first_arg_local(args) {
+                    let objs: Vec<_> = state.objects_for(src).collect();
+                    for id in objs {
+                        if matches!(state.heap.get(&id), Some(HeapState::RawOwned)) {
+                            state.heap.insert(id, HeapState::Reconstituted);
+                        }
+                    }
+                    // Do NOT remove points_to[src] — keep it so freed_kind(old_ptr) can
+                    // detect subsequent uses as double-free or UAF.
+                }
+                // Return value is a new RawOwned allocation (may be null, but tracking it
+                // enables double-free detection if it's passed to dealloc twice).
+                state.points_to.insert(dest, std::iter::once(obj_id).collect());
+                state.heap.insert(obj_id, HeapState::RawOwned);
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
+                state.lt_facts.remove(&dest);
+                state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
+                state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
+            } else if is_into_raw(&path) {
                 // Allocation-site abstraction: all allocations at this call site share ObjectId.
                 let obj_id = ObjectId(bb.index() as u32);
                 state.points_to.insert(dest, std::iter::once(obj_id).collect());
@@ -624,7 +651,10 @@ pub fn apply_terminator<'tcx>(
                 state.buf_written.remove(&dest);
                 state.lt_facts.remove(&dest);
                 state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
                 state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
             } else if is_from_raw(&path) {
                 let mut reconstructed_from: Option<Local> = None;
                 // Accept projected places (e.g. `from_raw(w.ptr)`) by falling back to the
@@ -1260,6 +1290,16 @@ pub fn is_from_raw(path: &str) -> bool {
 
 pub fn is_mem_forget(path: &str) -> bool {
     matches!(path, "std::mem::forget" | "core::mem::forget")
+}
+
+/// Returns `true` for raw allocator `realloc` calls — the old pointer is consumed
+/// (like `dealloc`) AND the return value is a fresh raw-owned allocation (like `alloc`).
+pub fn is_raw_realloc(path: &str) -> bool {
+    matches!(path,
+        "std::alloc::realloc" | "core::alloc::realloc" | "alloc::alloc::realloc" | "__rust_realloc")
+        || path.ends_with("Allocator::grow")
+        || path.ends_with("Allocator::grow_zeroed")
+        || path.ends_with("Allocator::shrink")
 }
 
 /// Matches `ptr::read`, `ptr::read_unaligned`, and the inherent method forms on

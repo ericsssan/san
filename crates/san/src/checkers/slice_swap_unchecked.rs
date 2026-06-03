@@ -13,23 +13,39 @@
 ///
 /// Nightly: `#![feature(slice_swap_unchecked)]`
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct SliceSwapUnchecked;
 
 impl Checker for SliceSwapUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
             if !path.ends_with("::swap_unchecked") {
                 continue;
+            }
+
+            // Suppress when both indices are proven bounded (< slice.len()) on all paths.
+            // swap_unchecked(self, a, b) — a is args[1], b is args[2].
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let get_local = |idx: usize| {
+                    args.get(idx).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    })
+                };
+                let a_bounded = get_local(1).map_or(false, |l| state.local_is_bounded(l));
+                let b_bounded = get_local(2).map_or(false, |l| state.local_is_bounded(l));
+                if a_bounded && b_bounded {
+                    continue;
+                }
             }
 
             findings.push(Finding {
