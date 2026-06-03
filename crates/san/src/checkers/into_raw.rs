@@ -157,21 +157,31 @@ impl Checker for IntoRaw {
                      bytes written into the raw buffer must be valid UTF-8 before \
                      reconstituting; stable since Rust 1.93",
                 )
+            } else if path.ends_with("::leak") && path.contains("Box") {
+                (
+                    "Box::leak",
+                    "intentionally leaks the Box, returning a `&'static mut T`; the allocation \
+                     is never freed unless reclaimed via `Box::from_raw` — use only when a \
+                     'static lifetime is genuinely required (e.g. initializing global state); \
+                     the returned reference has the same aliasing restrictions as any &mut T",
+                )
             } else {
                 continue;
             };
 
-            // Suppress when flow proves the pointer is consumed on all return paths:
-            // the object created at this site (keyed by basic-block index) is not
-            // still RawOwned at any exit point. Covers the common into_raw/from_raw
-            // pair in the same function — no audit noise for correctly-managed code.
-            let obj_id = ObjectId(bb.index() as u32);
-            if !exit_states.is_empty()
-                && exit_states.iter().all(|s| {
-                    !matches!(s.heap.get(&obj_id), Some(HeapState::RawOwned))
-                })
-            {
-                continue;
+            // Suppress when flow proves the pointer is consumed on all return paths.
+            // Only applicable for true into_raw operations — Box::leak has no tracked
+            // ObjectId in the heap so would be incorrectly suppressed otherwise.
+            use crate::analysis::transfer::is_into_raw;
+            if is_into_raw(&path) {
+                let obj_id = ObjectId(bb.index() as u32);
+                if !exit_states.is_empty()
+                    && exit_states.iter().all(|s| {
+                        !matches!(s.heap.get(&obj_id), Some(HeapState::RawOwned))
+                    })
+                {
+                    continue;
+                }
             }
 
             findings.push(Finding {

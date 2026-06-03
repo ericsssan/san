@@ -31,7 +31,14 @@ fn no_finding_paired() {
     let _ = unsafe { Box::from_raw(raw) };  // san: suppressed — flow-verified
 }
 
+// Bug: Box::leak — allocation is never freed; must be reclaimed manually.
+fn box_leak_static() -> &'static mut String {
+    let b = Box::new(String::from("leaked"));
+    Box::leak(b)  // san: into_raw (Box::leak)
+}
+
 fn main() {
+    let _leaked = box_leak_static();
     let raw = box_leak();
     unsafe { let _ = Box::from_raw(raw); }
 
