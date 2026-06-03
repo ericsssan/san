@@ -53,7 +53,7 @@ impl Checker for UnsafeFnPtr {
                 continue;
             }
 
-            // If any raw-pointer argument was already freed, this is UAF.
+            // If any argument was already freed (raw ptr or tracked wrapper), this is UAF.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 let mut uaf_found = false;
                 for arg in args.iter() {
@@ -61,7 +61,11 @@ impl Checker for UnsafeFnPtr {
                         Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
                         _ => None,
                     }) else { continue };
-                    if !matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..)) {
+                    // For UAF detection, accept both raw-pointer typed args AND any arg whose
+                    // local is tracked via points_to (e.g., NonNull wrappers from alloc).
+                    let is_raw_ptr = matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..));
+                    let is_tracked = state.objects_for(local).next().is_some();
+                    if !is_raw_ptr && !is_tracked {
                         continue;
                     }
                     match state.freed_kind(local) {
