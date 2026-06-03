@@ -17,10 +17,12 @@
 /// this rule are dropped in `run_checks` whenever their call-site span overlaps
 /// a finding from any other rule (see the suppression pass there). The result is
 /// a pure gap-filler: it fires only where nothing more specific did.
+use crate::analysis::state::FreedKind;
+use crate::checkers::uaf::uaf_finding;
 use crate::{Checker, Finding, Severity};
 use rustc_hir::Safety;
-use rustc_middle::mir::{Body, TerminatorKind};
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
+use rustc_middle::ty::{TyCtxt, TyKind};
 
 pub struct UnsafeFnCall;
 
@@ -29,18 +31,18 @@ impl Checker for UnsafeFnCall {
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,
-        _flow: &crate::analysis::FlowResults,
+        flow: &crate::analysis::FlowResults,
     ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
-            let Some((def_id, args)) = func.const_fn_def() else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
+            let Some((def_id, generic_args)) = func.const_fn_def() else { continue };
 
             // Only function items have a meaningful `fn_sig`; the safety of the
             // *instantiated* signature is what the caller must discharge.
-            let sig = tcx.fn_sig(def_id).instantiate(tcx, args).skip_binder();
+            let sig = tcx.fn_sig(def_id).instantiate(tcx, generic_args).skip_binder();
             if sig.safety() != Safety::Unsafe {
                 continue;
             }
@@ -50,6 +52,33 @@ impl Checker for UnsafeFnCall {
             let span = terminator.source_info.span;
             if span.from_expansion() {
                 continue;
+            }
+
+            // If any raw-pointer argument was already freed, this is UAF — escalate
+            // rather than emitting the generic unsafe-fn audit finding.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let mut uaf_found = false;
+                for arg in args.iter() {
+                    let Some(local) = (match &arg.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    }) else { continue };
+                    if !matches!(body.local_decls[local].ty.kind(), TyKind::RawPtr(..)) {
+                        continue;
+                    }
+                    match state.freed_kind(local) {
+                        FreedKind::Definite => {
+                            findings.push(uaf_finding(span, "read", false));
+                            uaf_found = true;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(uaf_finding(span, "read", true));
+                            uaf_found = true;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+                if uaf_found { continue; }
             }
 
             let path = tcx.def_path_str(def_id);
