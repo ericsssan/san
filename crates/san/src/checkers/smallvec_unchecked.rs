@@ -15,6 +15,7 @@
 /// OOB memory corruption in the inline-storage path.
 ///
 /// Safe alternative: `SmallVec::from_buf_and_len` which panics on len > capacity.
+use crate::analysis::transfer::operand_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -22,17 +23,27 @@ use rustc_middle::ty::TyCtxt;
 pub struct SmallVecUnchecked;
 
 impl Checker for SmallVecUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
             if !path.contains("smallvec") || !path.ends_with("::from_buf_and_len_unchecked") {
                 continue;
+            }
+
+            // from_buf_and_len_unchecked(buf, len) — suppress when `len` (args[1])
+            // is proven `<= capacity` on all paths (e.g. `if len <= A::size()`).
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(len_local) = args.get(1).and_then(|a| operand_local(&a.node)) {
+                    if state.local_is_bounded_or_eq(len_local) {
+                        continue;
+                    }
+                }
             }
 
             findings.push(Finding {

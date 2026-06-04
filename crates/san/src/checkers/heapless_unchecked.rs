@@ -17,6 +17,7 @@
 /// Common in embedded firmware that uses fixed-capacity containers without heap.
 /// RUSTSEC-2021-0051 (heapless 0.6 double-free) arose from violating a related capacity
 /// invariant in unsafe collection code.
+use crate::analysis::transfer::{first_arg_local, operand_local};
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -24,12 +25,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct HeaplessUnchecked;
 
 impl Checker for HeaplessUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -104,6 +105,38 @@ impl Checker for HeaplessUnchecked {
             } else {
                 continue;
             };
+
+            // Flow suppression by safety condition:
+            //   • push/enqueue family → receiver must have spare capacity (len < N)
+            //   • set_len(new_len)    → new_len must be ≤ N
+            //   • swap_remove(index)  → index must be < len
+            // The pop/dequeue family requires "non-empty" (len > 0), which no
+            // current flow fact proves, so those always fire.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let spare_api = path.ends_with("::push_unchecked")
+                    || path.ends_with("::push_front_unchecked")
+                    || path.ends_with("::push_back_unchecked")
+                    || path.ends_with("::enqueue_unchecked");
+                if spare_api {
+                    if let Some(recv) = first_arg_local(args) {
+                        if state.collection_has_spare(recv) {
+                            continue;
+                        }
+                    }
+                } else if path.ends_with("::set_len") {
+                    if let Some(n) = args.get(1).and_then(|a| operand_local(&a.node)) {
+                        if state.local_is_bounded_or_eq(n) {
+                            continue;
+                        }
+                    }
+                } else if path.ends_with("::swap_remove_unchecked") {
+                    if let Some(idx) = args.get(1).and_then(|a| operand_local(&a.node)) {
+                        if state.local_is_bounded(idx) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "heapless_unchecked",

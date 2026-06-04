@@ -17,6 +17,7 @@
 ///     `into_inner_unchecked` before verifying the full CAP bytes were received
 ///   • Using it in generic code where CAP is a type parameter — the caller
 ///     may not always guarantee the vector is full
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -24,17 +25,26 @@ use rustc_middle::ty::TyCtxt;
 pub struct ArrayvecUnchecked;
 
 impl Checker for ArrayvecUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
 
             if path.ends_with("::into_inner_unchecked") && path.contains("arrayvec") {
+                // Suppress when the vector is proven exactly full (`len == CAP`)
+                // on all paths — e.g. `if v.len() == v.capacity() { v.into_inner_unchecked() }`.
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(recv) = first_arg_local(args) {
+                        if state.collection_is_full(recv) {
+                            continue;
+                        }
+                    }
+                }
                 findings.push(Finding {
                     rule_id: "arrayvec_unchecked",
                     severity: Severity::Warning,

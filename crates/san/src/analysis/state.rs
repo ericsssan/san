@@ -83,6 +83,17 @@ pub struct BlockState {
     /// len/capacity guard; cleared when the collection is passed to any call (it
     /// may mutate the length). Join is INTERSECTION (like `bounded`).
     pub has_spare: HashSet<Local>,
+    /// comparison-result local → collection local proven to be exactly full
+    /// (`len == capacity`) when the comparison is TRUE (e.g. `Eq(len(C), cap(C))`).
+    /// Drained on the taken `SwitchInt` edge. UNION.
+    pub full_if_true: HashMap<Local, Local>,
+    /// Like `full_if_true` but the collection is full when the comparison is
+    /// FALSE (e.g. early-return `if len(C) != cap(C) { return }`).
+    pub full_if_false: HashMap<Local, Local>,
+    /// Collections proven to be exactly full (`len == capacity`) on ALL paths.
+    /// Mirror of `has_spare` for the `into_inner_unchecked`-style APIs whose
+    /// safety condition is "completely full". Join is INTERSECTION.
+    pub is_full: HashSet<Local>,
 }
 
 impl BlockState {
@@ -265,13 +276,15 @@ impl BlockState {
             }
         }
 
-        // Join the spare-capacity fact maps: UNION (same as lt_facts).
+        // Join the spare/full-capacity fact maps: UNION (same as lt_facts).
         for (map_self, map_other) in [
             (&mut result.ref_base, &other.ref_base),
             (&mut result.len_of, &other.len_of),
             (&mut result.cap_of, &other.cap_of),
             (&mut result.spare_if_true, &other.spare_if_true),
             (&mut result.spare_if_false, &other.spare_if_false),
+            (&mut result.full_if_true, &other.full_if_true),
+            (&mut result.full_if_false, &other.full_if_false),
         ] {
             for (local, base) in map_other {
                 map_self.entry(*local).or_insert_with(|| {
@@ -281,16 +294,17 @@ impl BlockState {
             }
         }
 
-        // Join has_spare: INTERSECTION — only proven when spare on ALL paths.
-        let new_has_spare: HashSet<Local> = result
-            .has_spare
-            .iter()
-            .copied()
-            .filter(|l| other.has_spare.contains(l))
-            .collect();
-        if new_has_spare != result.has_spare {
-            changed = true;
-            result.has_spare = new_has_spare;
+        // Join has_spare / is_full: INTERSECTION — only proven on ALL paths.
+        for (set_self, set_other) in [
+            (&mut result.has_spare, &other.has_spare),
+            (&mut result.is_full, &other.is_full),
+        ] {
+            let new_set: HashSet<Local> =
+                set_self.iter().copied().filter(|l| set_other.contains(l)).collect();
+            if new_set != *set_self {
+                changed = true;
+                *set_self = new_set;
+            }
         }
 
         (result, changed)
@@ -398,6 +412,14 @@ impl BlockState {
     /// capacity-checked-unchecked checkers (`push_unchecked`, …).
     pub fn collection_has_spare(&self, local: Local) -> bool {
         self.has_spare.contains(&local)
+    }
+
+    /// Returns `true` if the collection in `local` was proven to be exactly full
+    /// (`len == capacity`) on all reaching paths — e.g. guarded by
+    /// `if v.len() == v.capacity() { v.into_inner_unchecked() }`. Used to
+    /// suppress the "must be full" unchecked APIs.
+    pub fn collection_is_full(&self, local: Local) -> bool {
+        self.is_full.contains(&local)
     }
 
     /// Resolve a (possibly reborrowed) local to the base collection local it

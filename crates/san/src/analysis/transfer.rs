@@ -66,6 +66,9 @@ pub fn apply_statement<'tcx>(
     state.spare_if_true.remove(&dst_local);
     state.spare_if_false.remove(&dst_local);
     state.has_spare.remove(&dst_local);
+    state.full_if_true.remove(&dst_local);
+    state.full_if_false.remove(&dst_local);
+    state.is_full.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -75,6 +78,39 @@ pub fn apply_statement<'tcx>(
             || matches!(place.projection.as_ref(), [ProjectionElem::Deref])
         {
             state.ref_base.insert(dst_local, place.local);
+        }
+    }
+
+    // Propagate a spare/full-capacity proof through a plain move/copy of the
+    // collection local (e.g. `_8 = move _1` before `_1.into_inner_unchecked()`).
+    // For a move the source is consumed, so the proof transfers; for a copy both
+    // refer to the same collection state, so it is shared.
+    if let Rvalue::Use(Operand::Move(src) | Operand::Copy(src), _) = rvalue {
+        if src.projection.is_empty() {
+            let is_move = matches!(rvalue, Rvalue::Use(Operand::Move(_), _));
+            if state.has_spare.contains(&src.local) {
+                state.has_spare.insert(dst_local);
+                if is_move {
+                    state.has_spare.remove(&src.local);
+                }
+            }
+            if state.is_full.contains(&src.local) {
+                state.is_full.insert(dst_local);
+                if is_move {
+                    state.is_full.remove(&src.local);
+                }
+            }
+        }
+    }
+
+    // A slice length via `PtrMetadata` of a slice reference is the length of the
+    // underlying collection. (Types that deref to a slice, like `heapless::Vec`,
+    // lower `.len()` to `PtrMetadata` of the deref'd slice rather than an
+    // inherent `::len` call.) Attribute it to the base collection so a following
+    // `len < capacity` comparison links up.
+    if let Rvalue::UnaryOp(rustc_middle::mir::UnOp::PtrMetadata, op) = rvalue {
+        if let Some(l) = operand_local(op) {
+            state.len_of.insert(dst_local, state.deref_base(l));
         }
     }
 
@@ -472,6 +508,22 @@ pub fn apply_statement<'tcx>(
                     // `Gt(cap(C), len(C))` true ⟹ C has spare capacity.
                     record_spare(state, dst_local, op1, op2, true, true);
                 }
+                BinOp::Eq => {
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                    // `Eq(len(C), cap(C))` true ⟹ C is exactly full.
+                    record_full(state, dst_local, op1, op2, true);
+                }
+                BinOp::Ne => {
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                    // `!(len(C) != cap(C))` ⟹ len == cap ⟹ full on the FALSE edge.
+                    record_full(state, dst_local, op1, op2, false);
+                }
                 _ => {
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
@@ -646,6 +698,7 @@ pub fn apply_terminator<'tcx>(
                     if mutates {
                         let base = state.deref_base(l);
                         state.has_spare.remove(&base);
+                        state.is_full.remove(&base);
                     }
                 }
             }
@@ -672,6 +725,9 @@ pub fn apply_terminator<'tcx>(
             state.spare_if_true.remove(&dest);
             state.spare_if_false.remove(&dest);
             state.has_spare.remove(&dest);
+            state.full_if_true.remove(&dest);
+            state.full_if_false.remove(&dest);
+            state.is_full.remove(&dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -682,6 +738,14 @@ pub fn apply_terminator<'tcx>(
                     } else {
                         state.len_of.insert(dest, coll);
                     }
+                }
+            }
+            // Deref/DerefMut yield a view of the receiver collection; carry
+            // `ref_base` through so a subsequent `PtrMetadata`/`Len` on the
+            // result attributes to the collection (heapless::Vec etc.).
+            if path.ends_with("::deref") || path.ends_with("::deref_mut") {
+                if let Some(recv) = first_arg_local(args) {
+                    state.ref_base.insert(dest, state.deref_base(recv));
                 }
             }
 
@@ -1300,6 +1364,9 @@ pub fn refine_switchint_edge<'tcx>(
         if let Some(&coll) = state.spare_if_true.get(&discr_local) {
             state.has_spare.insert(coll);
         }
+        if let Some(&coll) = state.full_if_true.get(&discr_local) {
+            state.is_full.insert(coll);
+        }
     } else {
         // Discriminant zero → the comparison was false (take the negation).
         if let Some(&lhs) = state.ge_facts.get(&discr_local) {
@@ -1310,6 +1377,9 @@ pub fn refine_switchint_edge<'tcx>(
         }
         if let Some(&coll) = state.spare_if_false.get(&discr_local) {
             state.has_spare.insert(coll);
+        }
+        if let Some(&coll) = state.full_if_false.get(&discr_local) {
+            state.is_full.insert(coll);
         }
     }
 }
@@ -1341,6 +1411,36 @@ fn record_spare<'tcx>(
         state.spare_if_true.insert(dst, cl);
     } else {
         state.spare_if_false.insert(dst, cl);
+    }
+}
+
+/// Record a "collection is full" fact from a `len == capacity` comparison.
+/// Equality is symmetric, so either operand order (`len==cap` or `cap==len`)
+/// is accepted. When `on_true`, the collection is full if the comparison is
+/// TRUE (`full_if_true`); otherwise on the FALSE edge (`full_if_false`, e.g. an
+/// early-return `if len != cap { return }`). Only fires when both operands
+/// resolve to `len()`/`capacity()` calls on the SAME collection.
+fn record_full<'tcx>(
+    state: &mut BlockState,
+    dst: Local,
+    op1: &Operand<'tcx>,
+    op2: &Operand<'tcx>,
+    on_true: bool,
+) {
+    let (Some(a), Some(b)) = (operand_local(op1), operand_local(op2)) else { return };
+    // Accept (len, cap) or (cap, len).
+    let coll = match (state.len_of.get(&a), state.cap_of.get(&b)) {
+        (Some(&cl), Some(&cc)) if cl == cc => Some(cl),
+        _ => match (state.cap_of.get(&a), state.len_of.get(&b)) {
+            (Some(&cc), Some(&cl)) if cl == cc => Some(cl),
+            _ => None,
+        },
+    };
+    let Some(coll) = coll else { return };
+    if on_true {
+        state.full_if_true.insert(dst, coll);
+    } else {
+        state.full_if_false.insert(dst, coll);
     }
 }
 

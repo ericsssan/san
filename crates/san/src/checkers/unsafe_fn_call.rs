@@ -94,7 +94,10 @@ impl Checker for UnsafeFnCall {
                     // bounds-checked-unchecked APIs. The specific checker has
                     // already suppressed itself on this fact, so the generic
                     // backstop must not re-flag the now-safe call.
-                    if state.local_is_bounded_or_eq(local) || state.collection_has_spare(local) {
+                    if state.local_is_bounded_or_eq(local)
+                        || state.collection_has_spare(local)
+                        || state.collection_is_full(local)
+                    {
                         any_bounded = true;
                     }
                 }
