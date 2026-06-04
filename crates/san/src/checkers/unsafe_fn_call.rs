@@ -88,11 +88,13 @@ impl Checker for UnsafeFnCall {
                         any_tracked = true;
                     }
                     // A proven bound on an integer arg (e.g. `if n <= v.capacity()`
-                    // ahead of `set_len(n)`) discharges the precondition of the
-                    // bounds-checked-unchecked APIs (`set_len`, `*_unchecked`). The
-                    // specific checker has already suppressed itself on this fact, so
-                    // the generic backstop must not re-flag the now-safe call.
-                    if state.local_is_bounded_or_eq(local) {
+                    // ahead of `set_len(n)`) or a proven spare capacity on a
+                    // receiver collection (e.g. `if v.len() < v.capacity()` ahead
+                    // of `push_unchecked`) discharges the precondition of the
+                    // bounds-checked-unchecked APIs. The specific checker has
+                    // already suppressed itself on this fact, so the generic
+                    // backstop must not re-flag the now-safe call.
+                    if state.local_is_bounded_or_eq(local) || state.collection_has_spare(local) {
                         any_bounded = true;
                     }
                 }

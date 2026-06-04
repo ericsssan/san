@@ -123,6 +123,7 @@ declare -A EXPECTED=(
     [bytes_buf]="bytes_buf"
     [crossbeam_epoch]="crossbeam_epoch"
     [push_unchecked]="push_unchecked"
+    [push_unchecked_safe]=""
     [ndarray_unchecked]="ndarray_unchecked"
     [hashbrown_raw]="hashbrown_raw"
     [smallvec_unchecked]="smallvec_unchecked"

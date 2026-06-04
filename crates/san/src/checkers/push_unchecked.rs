@@ -24,6 +24,7 @@
 /// panics when the capacity is exceeded.
 ///
 /// Caught in: arrayvec, smallvec, tinyvec, and custom fixed-capacity collections.
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -31,12 +32,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct PushUnchecked;
 
 impl Checker for PushUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -58,6 +59,18 @@ impl Checker for PushUnchecked {
             } else {
                 continue;
             };
+
+            // Suppress when the receiver collection is proven to have spare
+            // capacity (`len < capacity`) on all paths — e.g. guarded by
+            // `if v.len() < v.capacity() { v.push_unchecked(x) }`. The receiver
+            // is the first argument of the (method) call.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(recv) = first_arg_local(args) {
+                    if state.collection_has_spare(recv) {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "push_unchecked",

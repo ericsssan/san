@@ -63,6 +63,26 @@ pub struct BlockState {
     /// derive a `reallocs_param` summary so wrapper methods like
     /// `BitVec::into_boxed_slice` propagate the realloc effect. Join is UNION.
     pub realloced_params: BTreeSet<Local>,
+    /// borrow-temp → base local of the borrowed place: records `dst = &(*base)`
+    /// / `dst = &base` so a `len`/`capacity` call whose receiver is a reborrow
+    /// can be attributed back to the underlying collection. Join is UNION.
+    pub ref_base: HashMap<Local, Local>,
+    /// result-of-`len()`-call → collection local. Join is UNION.
+    pub len_of: HashMap<Local, Local>,
+    /// result-of-`capacity()`-call → collection local. Join is UNION.
+    pub cap_of: HashMap<Local, Local>,
+    /// comparison-result local → collection local, where the collection is proven
+    /// to have spare capacity (`len < capacity`) when the comparison is TRUE
+    /// (e.g. `Lt(len(C), cap(C))`). Drained on the taken `SwitchInt` edge. UNION.
+    pub spare_if_true: HashMap<Local, Local>,
+    /// Like `spare_if_true` but the collection has spare capacity when the
+    /// comparison is FALSE (e.g. early-return `if len(C) >= cap(C) { return }`).
+    pub spare_if_false: HashMap<Local, Local>,
+    /// Collections proven to currently have spare capacity (`len < capacity`) on
+    /// ALL paths reaching here. Set on the taken `SwitchInt` edge of a
+    /// len/capacity guard; cleared when the collection is passed to any call (it
+    /// may mutate the length). Join is INTERSECTION (like `bounded`).
+    pub has_spare: HashSet<Local>,
 }
 
 impl BlockState {
@@ -245,6 +265,34 @@ impl BlockState {
             }
         }
 
+        // Join the spare-capacity fact maps: UNION (same as lt_facts).
+        for (map_self, map_other) in [
+            (&mut result.ref_base, &other.ref_base),
+            (&mut result.len_of, &other.len_of),
+            (&mut result.cap_of, &other.cap_of),
+            (&mut result.spare_if_true, &other.spare_if_true),
+            (&mut result.spare_if_false, &other.spare_if_false),
+        ] {
+            for (local, base) in map_other {
+                map_self.entry(*local).or_insert_with(|| {
+                    changed = true;
+                    *base
+                });
+            }
+        }
+
+        // Join has_spare: INTERSECTION — only proven when spare on ALL paths.
+        let new_has_spare: HashSet<Local> = result
+            .has_spare
+            .iter()
+            .copied()
+            .filter(|l| other.has_spare.contains(l))
+            .collect();
+        if new_has_spare != result.has_spare {
+            changed = true;
+            result.has_spare = new_has_spare;
+        }
+
         (result, changed)
     }
 
@@ -342,6 +390,21 @@ impl BlockState {
     /// `local_is_bounded` is true (< implies <=).
     pub fn local_is_bounded_or_eq(&self, local: Local) -> bool {
         self.bounded.contains(&local) || self.bounded_or_eq.contains(&local)
+    }
+
+    /// Returns `true` if the collection in `local` was proven to currently have
+    /// spare capacity (`len < capacity`) on all reaching paths — e.g. guarded by
+    /// `if v.len() < v.capacity() { v.push_unchecked(x) }`. Used to suppress the
+    /// capacity-checked-unchecked checkers (`push_unchecked`, …).
+    pub fn collection_has_spare(&self, local: Local) -> bool {
+        self.has_spare.contains(&local)
+    }
+
+    /// Resolve a (possibly reborrowed) local to the base collection local it
+    /// borrows, following one `ref_base` hop. Returns `local` itself if it is
+    /// not a tracked reborrow.
+    pub fn deref_base(&self, local: Local) -> Local {
+        self.ref_base.get(&local).copied().unwrap_or(local)
     }
 
     /// Classifies whether using the pointer in `local` is a use-after-free.

@@ -57,6 +57,27 @@ pub fn apply_statement<'tcx>(
     update_owner_alias(state, body, dst_local, rvalue);
     update_fn_ptr_target(state, dst_local, rvalue);
 
+    // Reassigning `dst` invalidates any spare-capacity fact keyed on it (and any
+    // proof that the collection it named has spare capacity). The specific
+    // handlers below re-establish `ref_base`/`len_of`/`cap_of`/spare facts.
+    state.ref_base.remove(&dst_local);
+    state.len_of.remove(&dst_local);
+    state.cap_of.remove(&dst_local);
+    state.spare_if_true.remove(&dst_local);
+    state.spare_if_false.remove(&dst_local);
+    state.has_spare.remove(&dst_local);
+
+    // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
+    // borrowed collection so a `len()`/`capacity()` call whose receiver is this
+    // temporary can be linked to the underlying collection.
+    if let Rvalue::Ref(_, _, place) = rvalue {
+        if place.projection.is_empty()
+            || matches!(place.projection.as_ref(), [ProjectionElem::Deref])
+        {
+            state.ref_base.insert(dst_local, place.local);
+        }
+    }
+
     match rvalue {
         // Rvalue::Use gained a second field (WithRetag) in this nightly.
         Rvalue::Use(Operand::Move(src), _) if src.projection.is_empty() => {
@@ -380,7 +401,7 @@ pub fn apply_statement<'tcx>(
             state.bounded_or_eq.remove(&dst_local);
         }
         Rvalue::BinaryOp(op, operands) => {
-            let (op1, _op2) = operands.as_ref();
+            let (op1, op2) = operands.as_ref();
             // For Offset/Add/Sub, the result points into the same allocation as the
             // source pointer — propagate the stale/freed state of the pointer operand.
             if matches!(op, BinOp::Offset | BinOp::Add | BinOp::Sub) {
@@ -412,6 +433,8 @@ pub fn apply_statement<'tcx>(
                     state.ge_facts.remove(&dst_local);
                     state.le_facts.remove(&dst_local);
                     state.gt_facts.remove(&dst_local);
+                    // `Lt(len(C), cap(C))` true ⟹ C has spare capacity.
+                    record_spare(state, dst_local, op1, op2, true, false);
                 }
                 BinOp::Ge => {
                     if let Some(lhs) = operand_local(op1) {
@@ -422,6 +445,8 @@ pub fn apply_statement<'tcx>(
                     state.lt_facts.remove(&dst_local);
                     state.le_facts.remove(&dst_local);
                     state.gt_facts.remove(&dst_local);
+                    // `!(len(C) >= cap(C))` ⟹ len < cap ⟹ spare on the FALSE edge.
+                    record_spare(state, dst_local, op1, op2, false, false);
                 }
                 BinOp::Le => {
                     if let Some(lhs) = operand_local(op1) {
@@ -432,6 +457,8 @@ pub fn apply_statement<'tcx>(
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
                     state.gt_facts.remove(&dst_local);
+                    // `!(cap(C) <= len(C))` ⟹ cap > len ⟹ spare on the FALSE edge.
+                    record_spare(state, dst_local, op1, op2, false, true);
                 }
                 BinOp::Gt => {
                     if let Some(lhs) = operand_local(op1) {
@@ -442,6 +469,8 @@ pub fn apply_statement<'tcx>(
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
                     state.le_facts.remove(&dst_local);
+                    // `Gt(cap(C), len(C))` true ⟹ C has spare capacity.
+                    record_spare(state, dst_local, op1, op2, true, true);
                 }
                 _ => {
                     state.lt_facts.remove(&dst_local);
@@ -601,6 +630,26 @@ pub fn apply_terminator<'tcx>(
             state.invalidate_owner(destination.local);
             state.owner_alias.remove(&destination.local);
 
+            // A call that takes a collection by `&mut`/`*mut` may change its
+            // length, invalidating a prior `len < capacity` proof. (Shared `&`
+            // receivers like `len()`/`capacity()` cannot, so they are skipped —
+            // otherwise an innocent `v.len()` inside the guarded block would drop
+            // the proof.) Applied to ALL calls, including unknown callees, so a
+            // stale spare proof never survives a possible mutation.
+            for arg in args.iter() {
+                if let Some(l) = operand_local(&arg.node) {
+                    let mutates = matches!(
+                        body.local_decls[l].ty.kind(),
+                        TyKind::Ref(_, _, rustc_middle::ty::Mutability::Mut)
+                            | TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut)
+                    );
+                    if mutates {
+                        let base = state.deref_base(l);
+                        state.has_spare.remove(&base);
+                    }
+                }
+            }
+
             let Some(def_id) = callee else {
                 escape_raw_ptr_args(state, body, args);
                 return;
@@ -613,6 +662,28 @@ pub fn apply_terminator<'tcx>(
                 return;
             }
             let dest = destination.local;
+
+            // Spare-capacity bookkeeping. `dest` is redefined by the call, so any
+            // spare-fact keyed on it is stale; clear it (then re-establish for
+            // len/capacity calls below).
+            state.ref_base.remove(&dest);
+            state.len_of.remove(&dest);
+            state.cap_of.remove(&dest);
+            state.spare_if_true.remove(&dest);
+            state.spare_if_false.remove(&dest);
+            state.has_spare.remove(&dest);
+            // Record `len()`/`capacity()` results so a following comparison can be
+            // attributed to the receiver collection.
+            if path.ends_with("::len") || path.ends_with("::capacity") {
+                if let Some(recv) = first_arg_local(args) {
+                    let coll = state.deref_base(recv);
+                    if path.ends_with("::capacity") {
+                        state.cap_of.insert(dest, coll);
+                    } else {
+                        state.len_of.insert(dest, coll);
+                    }
+                }
+            }
 
             if is_raw_realloc(&path) {
                 // realloc(old_ptr, layout, new_size): the old pointer is consumed (like dealloc)
@@ -1226,6 +1297,9 @@ pub fn refine_switchint_edge<'tcx>(
         if let Some(&lhs) = state.le_facts.get(&discr_local) {
             state.bounded_or_eq.insert(lhs);
         }
+        if let Some(&coll) = state.spare_if_true.get(&discr_local) {
+            state.has_spare.insert(coll);
+        }
     } else {
         // Discriminant zero → the comparison was false (take the negation).
         if let Some(&lhs) = state.ge_facts.get(&discr_local) {
@@ -1234,6 +1308,39 @@ pub fn refine_switchint_edge<'tcx>(
         if let Some(&lhs) = state.gt_facts.get(&discr_local) {
             state.bounded_or_eq.insert(lhs);
         }
+        if let Some(&coll) = state.spare_if_false.get(&discr_local) {
+            state.has_spare.insert(coll);
+        }
+    }
+}
+
+/// Record a spare-capacity fact from a `len`/`capacity` comparison feeding a
+/// guard. `cap_first` says `op1` is the capacity side (`op2` the len side);
+/// otherwise `op1` is the len side. When `on_true`, the collection is proven to
+/// have spare capacity if the comparison is TRUE (`spare_if_true`); otherwise
+/// when it is FALSE (`spare_if_false`, e.g. an early-return guard). Only fires
+/// when both operands resolve to `len()`/`capacity()` calls on the SAME
+/// collection, so unrelated comparisons never mark anything spare.
+fn record_spare<'tcx>(
+    state: &mut BlockState,
+    dst: Local,
+    op1: &Operand<'tcx>,
+    op2: &Operand<'tcx>,
+    on_true: bool,
+    cap_first: bool,
+) {
+    let (Some(a), Some(b)) = (operand_local(op1), operand_local(op2)) else { return };
+    let (len_l, cap_l) = if cap_first { (b, a) } else { (a, b) };
+    let (Some(&cl), Some(&cc)) = (state.len_of.get(&len_l), state.cap_of.get(&cap_l)) else {
+        return;
+    };
+    if cl != cc {
+        return;
+    }
+    if on_true {
+        state.spare_if_true.insert(dst, cl);
+    } else {
+        state.spare_if_false.insert(dst, cl);
     }
 }
 
