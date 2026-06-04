@@ -6,7 +6,7 @@ use rustc_middle::ty::TyCtxt;
 
 use crate::analysis::state::BlockState;
 use crate::analysis::summary::SummaryMap;
-use crate::analysis::transfer::{apply_statement, apply_terminator};
+use crate::analysis::transfer::{apply_statement, apply_terminator, refine_switchint_edge};
 
 pub struct FlowResults {
     /// Stable fixpoint state at the entry of each basic block.
@@ -120,15 +120,22 @@ fn run_fixpoint<'tcx>(
             apply_terminator(&mut state, tcx, body, bb, term, summaries);
         }
 
-        // Propagate to each successor.
+        // Propagate to each successor. For a `SwitchInt` on a comparison
+        // temporary, refine the per-edge state so the taken branch records the
+        // proven bound (e.g. `if idx <= len` → `bounded_or_eq` on the `then`
+        // edge). All other terminators propagate the same exit state unchanged.
         for succ in block_successors(block_data) {
+            let mut edge_state = state.clone();
+            if let Some(term) = &block_data.terminator {
+                refine_switchint_edge(&mut edge_state, term, succ);
+            }
             let changed = match &entry_states[succ.index()] {
                 None => {
-                    entry_states[succ.index()] = Some(state.clone());
+                    entry_states[succ.index()] = Some(edge_state);
                     true
                 }
                 Some(existing) => {
-                    let (merged, changed) = existing.join_with(&state);
+                    let (merged, changed) = existing.join_with(&edge_state);
                     if changed {
                         entry_states[succ.index()] = Some(merged);
                     }

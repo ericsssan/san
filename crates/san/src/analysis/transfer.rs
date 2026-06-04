@@ -1186,6 +1186,57 @@ pub fn operand_local<'tcx>(op: &Operand<'tcx>) -> Option<Local> {
     }
 }
 
+/// Refine `state` along the CFG edge from a `SwitchInt` terminator into `succ`,
+/// using any comparison fact recorded for the switched-on discriminant.
+///
+/// A source-level `if idx <= len { ... }` lowers to a `Le` temporary feeding a
+/// two-way `SwitchInt` (`[0 -> else, otherwise -> then]`) — NOT an `Assert`. The
+/// `Assert` handler in `apply_terminator` only catches compiler-inserted bounds
+/// checks; this catches user-written guards. On the `then` (otherwise/nonzero)
+/// edge the comparison held, so `idx <= len` becomes a `bounded_or_eq` fact; on
+/// the `else` (zero) edge the negation holds. The fact is only added on the
+/// edge where it is true — `join_with` intersects `bounded`/`bounded_or_eq`, so
+/// it correctly evaporates at any block that merges both edges.
+pub fn refine_switchint_edge<'tcx>(
+    state: &mut BlockState,
+    term: &Terminator<'tcx>,
+    succ: BasicBlock,
+) {
+    let TerminatorKind::SwitchInt { discr, targets } = &term.kind else { return };
+    let Some(discr_local) = operand_local(discr) else { return };
+
+    // Only the canonical two-way bool switch from a comparison: value 0 is the
+    // `false`/`else` edge, `otherwise` is the `true`/`then` edge. Bail on any
+    // other shape (multi-value match, or `succ` reachable via both edges).
+    let zero_target = targets.iter().find(|(v, _)| *v == 0).map(|(_, t)| t);
+    let other_target = targets.otherwise();
+    let is_true_edge = if succ == other_target && Some(succ) != zero_target {
+        true
+    } else if Some(succ) == zero_target && succ != other_target {
+        false
+    } else {
+        return;
+    };
+
+    if is_true_edge {
+        // Discriminant nonzero → the comparison held.
+        if let Some(&lhs) = state.lt_facts.get(&discr_local) {
+            state.bounded.insert(lhs);
+        }
+        if let Some(&lhs) = state.le_facts.get(&discr_local) {
+            state.bounded_or_eq.insert(lhs);
+        }
+    } else {
+        // Discriminant zero → the comparison was false (take the negation).
+        if let Some(&lhs) = state.ge_facts.get(&discr_local) {
+            state.bounded.insert(lhs);
+        }
+        if let Some(&lhs) = state.gt_facts.get(&discr_local) {
+            state.bounded_or_eq.insert(lhs);
+        }
+    }
+}
+
 /// Extract the Local from the first call argument, requiring no projections.
 /// Use for `from_raw` — the raw pointer must be a plain local.
 pub fn first_arg_local<'tcx>(

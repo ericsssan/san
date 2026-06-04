@@ -1,0 +1,6 @@
+[package]
+name = "vec_set_len_safe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

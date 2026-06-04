@@ -61,6 +61,7 @@ impl Checker for UnsafeFnCall {
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 let mut uaf_found = false;
                 let mut any_tracked = false;
+                let mut any_bounded = false;
                 for arg in args.iter() {
                     let Some(local) = (match &arg.node {
                         Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
@@ -86,8 +87,17 @@ impl Checker for UnsafeFnCall {
                     if state.objects_for(local).next().is_some() {
                         any_tracked = true;
                     }
+                    // A proven bound on an integer arg (e.g. `if n <= v.capacity()`
+                    // ahead of `set_len(n)`) discharges the precondition of the
+                    // bounds-checked-unchecked APIs (`set_len`, `*_unchecked`). The
+                    // specific checker has already suppressed itself on this fact, so
+                    // the generic backstop must not re-flag the now-safe call.
+                    if state.local_is_bounded_or_eq(local) {
+                        any_bounded = true;
+                    }
                 }
                 if uaf_found { continue; }
+                if any_bounded { continue; }
                 // For calls on tracked pointers where a specific checker handles the
                 // lifecycle, suppress the generic backstop to avoid redundant audit noise.
                 if any_tracked

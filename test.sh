@@ -60,6 +60,7 @@ declare -A EXPECTED=(
     [unwrap_unchecked]="unwrap_unchecked"
     [vec_from_raw_parts]="vec_from_raw_parts"
     [vec_set_len]="vec_set_len"
+    [vec_set_len_safe]=""
     [waker_from_raw]="waker_from_raw"
     [cstr_from_bytes_unchecked]="cstr_from_bytes_unchecked"
     [cstring_from_raw]="cstring_from_raw"
