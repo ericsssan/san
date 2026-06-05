@@ -28,6 +28,8 @@
 ///
 /// Seen in: manually implemented future poll loops, custom async runtimes,
 /// and FFI layers that wrap async Rust for C callers.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_hir::def::DefKind;
 use rustc_middle::mir::{Body, TerminatorKind};
@@ -36,7 +38,7 @@ use rustc_middle::ty::TyCtxt;
 pub struct PinNewUnchecked;
 
 impl Checker for PinNewUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         // Compiler-generated async/await desugaring produces Pin::new_unchecked calls that
         // are always safe: the coroutine body itself is pinned before being polled, which
         // guarantees sub-futures stored inside it cannot be moved.
@@ -46,7 +48,7 @@ impl Checker for PinNewUnchecked {
 
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
 
             // pin_project!/pin! and similar widely-audited macros expand to
@@ -56,7 +58,7 @@ impl Checker for PinNewUnchecked {
                 continue;
             }
 
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -92,6 +94,27 @@ impl Checker for PinNewUnchecked {
             } else {
                 continue;
             };
+
+            // Escalate to a precise UAF when the pointer/reference being pinned (or
+            // unwrapped) was already reconstituted/freed on a reaching path —
+            // pinning a dangling pointer is use-after-free.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg_local) = first_arg_local(args) {
+                    match state.freed_kind(arg_local) {
+                        FreedKind::Definite => {
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "pin_new_unchecked",

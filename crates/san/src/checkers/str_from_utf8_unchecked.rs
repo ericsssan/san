@@ -21,6 +21,8 @@
 /// The safe alternative is `str::from_utf8` which returns a Result.
 ///
 /// RustSec: RUSTSEC-2021-0079 (through various FFI string conversion crates).
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -28,12 +30,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct StrFromUtf8Unchecked;
 
 impl Checker for StrFromUtf8Unchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -78,6 +80,31 @@ impl Checker for StrFromUtf8Unchecked {
                      (returns Result) unless provably ASCII or already validated upstream"
                 )
             };
+
+            // For the `from_raw_parts` variants (which take a raw `*const u8` /
+            // `*mut u8`), escalate to a precise UAF when that pointer was already
+            // reconstituted/freed on a reaching path. The byte-slice variants take
+            // an owned/borrowed slice, not a freeable raw pointer, so they keep the
+            // UTF-8-validity audit finding.
+            if fn_name.starts_with("str::from_raw_parts") {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(arg_local) = first_arg_local(args) {
+                        match state.freed_kind(arg_local) {
+                            FreedKind::Definite => {
+                                findings.push(crate::checkers::uaf::uaf_finding(
+                                    terminator.source_info.span, "read", false));
+                                continue;
+                            }
+                            FreedKind::Potential => {
+                                findings.push(crate::checkers::uaf::uaf_finding(
+                                    terminator.source_info.span, "read", true));
+                                continue;
+                            }
+                            FreedKind::NotFreed => {}
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "str_from_utf8_unchecked",

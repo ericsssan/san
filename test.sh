@@ -51,6 +51,7 @@ declare -A EXPECTED=(
     [slice_get_unchecked]="slice_get_unchecked"
     [static_mut]="static_mut"
     [str_from_utf8_unchecked]="str_from_utf8_unchecked"
+    [str_from_raw_parts_uaf]="use_after_free"
     [str_mutation]="str_mutation"
     [thread_spawn_unchecked]="thread_spawn_unchecked"
     [unchecked_int_arith]="unchecked_int_arith"

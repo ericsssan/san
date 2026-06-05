@@ -1,7 +1,8 @@
 /// Detects calls to `Arc::from_raw`, `Arc::increment_strong_count`,
 /// `Arc::decrement_strong_count`, `Rc::from_raw`, related reference-counted
-/// pointer reconstitution functions, `Arc::get_mut_unchecked` / `Rc::get_mut_unchecked`,
-/// and `Thread::from_raw`.
+/// pointer reconstitution functions, and `Thread::from_raw`.
+/// (`Arc`/`Rc::get_mut_unchecked` is handled by the dedicated
+/// `arc_get_mut_unchecked` checker.)
 ///
 /// `Arc::from_raw(ptr)` reconstructs an Arc from a raw pointer. The caller must:
 ///   • The pointer must have been obtained from `Arc::into_raw` (same T, same allocator)
@@ -15,12 +16,6 @@
 /// The `increment_strong_count`/`decrement_strong_count` pair is the manual
 /// reference-counting API — mismatched calls cause premature free (underflow)
 /// or memory leaks (overflow).
-///
-/// `Arc::get_mut_unchecked` / `Rc::get_mut_unchecked` return `&mut T` without
-/// checking if other Arc/Rc or Weak references exist. The caller must guarantee
-/// no other strong or weak references are alive — if multiple owners exist,
-/// this creates aliasing &mut T references, which is immediate UB.
-/// (Nightly: `#![feature(get_mut_unchecked)]`)
 ///
 /// RustSec: appears in FFI boundary code that exports Arc-backed C objects;
 /// common pattern in Python/Node.js bindings to Rust.
@@ -92,20 +87,6 @@ impl Checker for ArcFromRaw {
                     "pointer must still be valid; decrement to zero frees the allocation; \
                      must be paired with a corresponding increment or into_raw; \
                      Rc is not thread-safe, this operation must be on the creating thread",
-                )
-            } else if path.ends_with("::get_mut_unchecked") && path.contains("Arc") {
-                (
-                    "Arc::get_mut_unchecked",
-                    "caller must ensure no other Arc or Weak references to this allocation \
-                     exist; if any do, the returned &mut T aliases with shared references — UB; \
-                     use Arc::get_mut for the safe checked version",
-                )
-            } else if path.ends_with("::get_mut_unchecked") && path.contains("Rc") {
-                (
-                    "Rc::get_mut_unchecked",
-                    "caller must ensure no other Rc or Weak references to this allocation \
-                     exist; if any do, the returned &mut T aliases with shared references — UB; \
-                     use Rc::get_mut for the safe checked version",
                 )
             } else if path.ends_with("::from_raw") && path.contains("sync::Weak") {
                 (

@@ -24,6 +24,8 @@
 /// guarantees the type.
 ///
 /// Nightly-only: `#![feature(downcast_unchecked)]`.
+use crate::analysis::state::FreedKind;
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -31,12 +33,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct DowncastUnchecked;
 
 impl Checker for DowncastUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -62,6 +64,26 @@ impl Checker for DowncastUnchecked {
             } else {
                 "Box<dyn Any>"
             };
+
+            // Escalate to a precise UAF when the smart pointer being downcast was
+            // already reconstituted/freed on a reaching path.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg_local) = first_arg_local(args) {
+                    match state.freed_kind(arg_local) {
+                        FreedKind::Definite => {
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", false));
+                            continue;
+                        }
+                        FreedKind::Potential => {
+                            findings.push(crate::checkers::uaf::uaf_finding(
+                                terminator.source_info.span, "read", true));
+                            continue;
+                        }
+                        FreedKind::NotFreed => {}
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "downcast_unchecked",
