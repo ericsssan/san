@@ -82,6 +82,8 @@ pub fn apply_statement<'tcx>(
     state.const_le.remove(&dst_local);
     state.const_gt.remove(&dst_local);
     state.const_ge.remove(&dst_local);
+    state.fd_origin.remove(&dst_local);
+    state.fd_consumed.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -121,6 +123,8 @@ pub fn apply_statement<'tcx>(
             propagate_set!(is_full);
             propagate_set!(nonzero);
             propagate_set!(finite);
+            propagate_set!(fd_origin);
+            propagate_set!(fd_consumed);
             propagate_map_u64!(const_upper);
             propagate_map_u64!(const_lower);
         }
@@ -810,6 +814,8 @@ pub fn apply_terminator<'tcx>(
             state.const_le.remove(&dest);
             state.const_gt.remove(&dest);
             state.const_ge.remove(&dest);
+            state.fd_origin.remove(&dest);
+            state.fd_consumed.remove(&dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -842,6 +848,23 @@ pub fn apply_terminator<'tcx>(
                 if let Some(recv) = first_arg_local(args) {
                     state.ref_base.insert(dest, state.deref_base(recv));
                 }
+            }
+
+            // fd-lifecycle: track into_raw_fd → from_raw_fd ownership transfer.
+            if is_into_raw_fd(&path) {
+                state.fd_origin.insert(dest);
+            } else if is_from_raw_fd_call(&path) {
+                if let Some(arg) = first_arg_local(args) {
+                    state.fd_consumed.insert(arg);
+                }
+            }
+
+            // Thread spawn: from this point on, concurrent env access is unsafe.
+            if path.ends_with("thread::spawn")
+                || path.ends_with("Builder::spawn")
+                || path.ends_with("Builder::spawn_unchecked")
+            {
+                state.thread_spawned = true;
             }
 
             if is_raw_realloc(&path) {
@@ -1870,4 +1893,25 @@ pub fn is_buf_write(path: &str) -> bool {
 /// Returns `true` for `MaybeUninit::assume_init` and related consuming variants.
 pub fn is_maybe_uninit_assume_init(path: &str) -> bool {
     path.contains("MaybeUninit") && path.contains("assume_init")
+}
+
+/// Returns `true` for I/O handle ownership-extraction calls: `into_raw_fd`,
+/// `into_raw_socket`, `into_raw_handle`. The result is a raw integer that is the
+/// SOLE owner of the underlying OS handle.
+pub fn is_into_raw_fd(path: &str) -> bool {
+    path.ends_with("::into_raw_fd")
+        || path.ends_with("::into_raw_socket")
+        || path.ends_with("::into_raw_handle")
+}
+
+/// Returns `true` for calls that reconstitute a Rust-owned I/O type from a raw
+/// integer: `from_raw_fd`, `from_raw_socket`, `from_raw_handle`,
+/// `from_raw_handle_or_invalid`, and `borrow_raw` on `BorrowedFd`/`BorrowedSocket`.
+pub fn is_from_raw_fd_call(path: &str) -> bool {
+    path.ends_with("::from_raw_fd")
+        || path.ends_with("::from_raw_socket")
+        || path.ends_with("::from_raw_handle")
+        || path.ends_with("::from_raw_handle_or_invalid")
+        || (path.ends_with("::borrow_raw")
+            && (path.contains("BorrowedFd") || path.contains("BorrowedSocket")))
 }

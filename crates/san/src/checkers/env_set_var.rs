@@ -39,10 +39,15 @@ use rustc_middle::ty::TyCtxt;
 pub struct EnvSetVar;
 
 impl Checker for EnvSetVar {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
             let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
@@ -69,11 +74,28 @@ impl Checker for EnvSetVar {
                 continue;
             };
 
+            // If `thread::spawn` was called before this point on any reaching path,
+            // the env mutation is provably concurrent — escalate to Error.
+            let (severity, message) = if flow
+                .state_before_terminator(tcx, body, bb)
+                .map_or(false, |s| s.thread_spawned)
+            {
+                (
+                    Severity::Error,
+                    format!(
+                        "CONCURRENT: `{fn_name}` called after `thread::spawn` — \
+                         {note} (thread-safety violation confirmed by dataflow)"
+                    ),
+                )
+            } else {
+                (Severity::Warning, format!("`{fn_name}` — {note}"))
+            };
+
             findings.push(Finding {
                 rule_id: "env_set_var",
-                severity: Severity::Warning,
+                severity,
                 span: terminator.source_info.span,
-                message: format!("`{fn_name}` — {note}"),
+                message,
             });
         }
 

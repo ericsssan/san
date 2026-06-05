@@ -1,0 +1,6 @@
+[package]
+name = "raw_fd_double_own"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

@@ -134,6 +134,19 @@ pub struct BlockState {
     pub const_gt: HashMap<Local, (Local, u64)>,
     /// cmp-result → (local, k): cmp = `local ≥ k`. Join = UNION.
     pub const_ge: HashMap<Local, (Local, u64)>,
+
+    // ── fd-lifecycle / I/O-safety domain ───────────────────────────────────
+    /// Locals whose integer value was produced by `into_raw_fd/socket/handle`.
+    /// Suppresses `from_raw_fd` for the canonical transfer pattern (safe).
+    /// Join = INTERSECTION (only suppress if provable on ALL paths).
+    pub fd_origin: HashSet<Local>,
+    /// Locals whose raw-fd integer was already passed to `from_raw_fd/socket/
+    /// handle`. A second `from_raw_*` on the same local is double-ownership.
+    /// Join = UNION (escalate if consumed on ANY path).
+    pub fd_consumed: HashSet<Local>,
+    /// Set on any path that calls `thread::spawn` or `thread::Builder::spawn`.
+    /// Used to escalate `env::set_var` when provably concurrent. Join = OR.
+    pub thread_spawned: bool,
 }
 
 impl BlockState {
@@ -406,6 +419,27 @@ impl BlockState {
             result.const_lower = new_lower;
         }
 
+        // fd_origin: INTERSECTION — only suppress transfer pattern if proven on ALL paths.
+        let new_fd_origin: HashSet<Local> = result
+            .fd_origin.iter().copied().filter(|l| other.fd_origin.contains(l)).collect();
+        if new_fd_origin != result.fd_origin {
+            changed = true;
+            result.fd_origin = new_fd_origin;
+        }
+
+        // fd_consumed: UNION — escalate double-ownership if consumed on ANY path.
+        for &l in &other.fd_consumed {
+            if result.fd_consumed.insert(l) {
+                changed = true;
+            }
+        }
+
+        // thread_spawned: OR — once a thread was spawned on any path, it's concurrent.
+        if other.thread_spawned && !result.thread_spawned {
+            result.thread_spawned = true;
+            changed = true;
+        }
+
         (result, changed)
     }
 
@@ -567,6 +601,20 @@ impl BlockState {
     /// not a tracked reborrow.
     pub fn deref_base(&self, local: Local) -> Local {
         self.ref_base.get(&local).copied().unwrap_or(local)
+    }
+
+    /// Returns `true` if `local` holds a raw fd integer produced by
+    /// `into_raw_fd/socket/handle` on ALL reaching paths — the canonical
+    /// transfer pattern; the corresponding `from_raw_fd` is safe.
+    pub fn fd_was_transferred(&self, local: Local) -> bool {
+        self.fd_origin.contains(&local)
+    }
+
+    /// Returns `true` if `local` holds a raw fd integer that was already
+    /// consumed by a previous `from_raw_fd/socket/handle` call on ANY reaching
+    /// path — a second `from_raw_*` on the same integer is double-ownership.
+    pub fn fd_is_consumed(&self, local: Local) -> bool {
+        self.fd_consumed.contains(&local)
     }
 
     /// Classifies whether using the pointer in `local` is a use-after-free.
