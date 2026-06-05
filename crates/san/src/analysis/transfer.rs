@@ -88,6 +88,8 @@ pub fn apply_statement<'tcx>(
     state.ne_pair_if_true.remove(&dst_local);
     state.eq_pair_if_true.remove(&dst_local);
     state.keys_are_ne.retain(|&(a, b)| a != dst_local && b != dst_local);
+    state.eq_locals.retain(|&(a, b)| a != dst_local && b != dst_local);
+    state.cast_origin.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -129,6 +131,11 @@ pub fn apply_statement<'tcx>(
             propagate_set!(finite);
             propagate_set!(fd_origin);
             propagate_set!(fd_consumed);
+            // Propagate cast_origin: if src was itself a cast, dst inherits that origin.
+            if let Some(&orig) = state.cast_origin.get(&src.local) {
+                state.cast_origin.insert(dst_local, orig);
+                if is_move { state.cast_origin.remove(&src.local); }
+            }
             if let Some(comps) = state.array_components.get(&src.local).cloned() {
                 state.array_components.insert(dst_local, comps);
                 if is_move { state.array_components.remove(&src.local); }
@@ -491,6 +498,18 @@ pub fn apply_statement<'tcx>(
             state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
             state.bounded_or_eq.remove(&dst_local);
+        }
+        // Integer / float numeric casts: record the origin local so that
+        // `locals_are_eq` can see through `k as isize` style conversions.
+        Rvalue::Cast(
+            CastKind::IntToInt
+            | CastKind::IntToFloat
+            | CastKind::FloatToInt
+            | CastKind::FloatToFloat,
+            Operand::Copy(src) | Operand::Move(src),
+            _,
+        ) if src.projection.is_empty() => {
+            state.cast_origin.insert(dst_local, src.local);
         }
         Rvalue::BinaryOp(op, operands) => {
             let (op1, op2) = operands.as_ref();
@@ -857,6 +876,8 @@ pub fn apply_terminator<'tcx>(
             state.ne_pair_if_true.remove(&dest);
             state.eq_pair_if_true.remove(&dest);
             state.keys_are_ne.retain(|&(a, b)| a != dest && b != dest);
+            state.eq_locals.retain(|&(a, b)| a != dest && b != dest);
+            state.cast_origin.remove(&dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -1567,6 +1588,11 @@ pub fn refine_switchint_edge<'tcx>(
             let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
             state.keys_are_ne.insert(pair);
         }
+        // `Eq(a, b)` true ⟹ a == b.
+        if let Some(&(a, b)) = state.eq_pair_if_true.get(&discr_local) {
+            let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
+            state.eq_locals.insert(pair);
+        }
     } else {
         // Discriminant zero → the comparison was false (take the negation).
         if let Some(&lhs) = state.ge_facts.get(&discr_local) {
@@ -1615,6 +1641,11 @@ pub fn refine_switchint_edge<'tcx>(
         if let Some(&(a, b)) = state.eq_pair_if_true.get(&discr_local) {
             let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
             state.keys_are_ne.insert(pair);
+        }
+        // `Ne(a, b)` false ⟹ a == b.
+        if let Some(&(a, b)) = state.ne_pair_if_true.get(&discr_local) {
+            let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
+            state.eq_locals.insert(pair);
         }
     }
 }

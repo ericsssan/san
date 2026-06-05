@@ -28,18 +28,23 @@
 /// Safe alternatives: use `ndarray::linalg::dot`, `nalgebra::Matrix::mul`, or
 /// the `blas`/`cblas` crates which often provide safer wrappers.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct MatrixmultiplyUnchecked;
 
 impl Checker for MatrixmultiplyUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -76,6 +81,14 @@ impl Checker for MatrixmultiplyUnchecked {
                 continue;
             };
 
+            // Row-major stride coherence: suppress when k == rsa (arg[1] == arg[5])
+            // and n == rsb (arg[2] == arg[8]) and n == rsc (arg[2] == arg[12]).
+            // The user writes `k as isize` for the strides; cast_origin sees through it.
+            // Signature: xgemm(m, k, n, alpha, a, rsa, csa, b, rsb, csb, beta, c, rsc, csc)
+            if gemm_stride_coherent(args, flow, tcx, body, bb) {
+                continue;
+            }
+
             findings.push(Finding {
                 rule_id: "matrixmultiply_unchecked",
                 severity: Severity::Warning,
@@ -86,4 +99,31 @@ impl Checker for MatrixmultiplyUnchecked {
 
         findings
     }
+}
+
+/// Returns `true` when the xgemm call has provably coherent row-major strides:
+///   arg[1]=k == arg[5]=rsa  (A's row stride equals inner dimension)
+///   arg[2]=n == arg[8]=rsb  (B's row stride equals output cols)
+///   arg[2]=n == arg[12]=rsc (C's row stride equals output cols)
+/// Looks through `k as isize` / `n as isize` casts via `locals_are_eq`.
+pub fn gemm_stride_coherent<'tcx>(
+    args: &[rustc_span::Spanned<Operand<'tcx>>],
+    flow: &crate::analysis::FlowResults,
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    bb: rustc_middle::mir::BasicBlock,
+) -> bool {
+    let arg_local = |idx: usize| args.get(idx).and_then(|a| match &a.node {
+        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+        _ => None,
+    });
+    let (Some(k), Some(n), Some(rsa), Some(rsb), Some(rsc)) =
+        (arg_local(1), arg_local(2), arg_local(5), arg_local(8), arg_local(12))
+    else {
+        return false;
+    };
+    let Some(state) = flow.state_before_terminator(tcx, body, bb) else { return false };
+    state.locals_are_eq(k, rsa)
+        && state.locals_are_eq(n, rsb)
+        && state.locals_are_eq(n, rsc)
 }

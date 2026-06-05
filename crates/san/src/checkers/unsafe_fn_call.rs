@@ -120,6 +120,13 @@ impl Checker for UnsafeFnCall {
                     arg_locals[..i].iter().any(|&b| state.locals_are_ne(a, b))
                 });
                 if any_ne_pair { continue; }
+                // matrixmultiply xgemm: suppress when row-major stride coherence proven.
+                if path.contains("matrixmultiply")
+                    && crate::checkers::matrixmultiply_unchecked::gemm_stride_coherent(
+                        args, flow, tcx, body, bb)
+                {
+                    continue;
+                }
                 // For calls on tracked pointers where a specific checker handles the
                 // lifecycle, suppress the generic backstop to avoid redundant audit noise.
                 if any_tracked

@@ -135,6 +135,18 @@ pub struct BlockState {
     /// cmp-result → (local, k): cmp = `local ≥ k`. Join = UNION.
     pub const_ge: HashMap<Local, (Local, u64)>,
 
+    // ── local-pair equality / disequality domain ───────────────────────────
+    /// Canonical pairs (a.index() ≤ b.index()) proven equal on ALL reaching
+    /// paths — from `Eq(a, b)` true edge or `Ne(a, b)` false edge.
+    /// Drives suppression of stride-coherence checks (matrixmultiply, etc.).
+    /// Join = INTERSECTION. Cleared when either local is reassigned.
+    pub eq_locals: HashSet<(Local, Local)>,
+    /// `dst = integer_cast(src)` → `cast_origin[dst] = src`. Lets
+    /// `locals_are_eq` see through `k as isize` style conversions so that an
+    /// `isize` stride argument is recognised as equal to its `usize` source.
+    /// Join = UNION. Cleared when dst is reassigned.
+    pub cast_origin: HashMap<Local, Local>,
+
     // ── local-pair disequality domain ──────────────────────────────────────
     /// `cmp_local → (a, b)`: `cmp = Ne(a, b)` where both are plain locals.
     /// True SwitchInt edge drains into `keys_are_ne`. Join = UNION.
@@ -441,6 +453,16 @@ impl BlockState {
             result.const_lower = new_lower;
         }
 
+        // eq_locals: INTERSECTION — only suppress if equality proven on ALL paths.
+        let new_eq: HashSet<(Local, Local)> = result
+            .eq_locals.iter().copied().filter(|p| other.eq_locals.contains(p)).collect();
+        if new_eq != result.eq_locals { changed = true; result.eq_locals = new_eq; }
+
+        // cast_origin: UNION — keep provenance from either branch.
+        for (local, src) in &other.cast_origin {
+            result.cast_origin.entry(*local).or_insert_with(|| { changed = true; *src });
+        }
+
         // ne_pair_if_true / eq_pair_if_true: UNION.
         for (local, pair) in &other.ne_pair_if_true {
             result.ne_pair_if_true.entry(*local).or_insert_with(|| { changed = true; *pair });
@@ -647,6 +669,25 @@ impl BlockState {
     /// not a tracked reborrow.
     pub fn deref_base(&self, local: Local) -> Local {
         self.ref_base.get(&local).copied().unwrap_or(local)
+    }
+
+    /// Returns `true` if `a` and `b` are proven == on ALL reaching paths — e.g.
+    /// from `if a == b` or `assert_eq!(a, b)`. Also looks through one level of
+    /// integer cast so that `k as isize` is recognised as equal to the `k` source.
+    pub fn locals_are_eq(&self, a: Local, b: Local) -> bool {
+        if a == b { return true; }
+        let canon = |x: Local, y: Local| if x.index() <= y.index() { (x, y) } else { (y, x) };
+        if self.eq_locals.contains(&canon(a, b)) { return true; }
+        let a0 = self.cast_origin.get(&a).copied();
+        let b0 = self.cast_origin.get(&b).copied();
+        match (a0, b0) {
+            (Some(sa), _) if sa == b => true,
+            (_, Some(sb)) if sb == a => true,
+            (Some(sa), Some(sb)) if sa == sb => true,
+            (Some(sa), _) => self.eq_locals.contains(&canon(sa, b)),
+            (_, Some(sb)) => self.eq_locals.contains(&canon(a, sb)),
+            _ => false,
+        }
     }
 
     /// Returns `true` if `a` and `b` are proven ≠ on ALL reaching paths — e.g.

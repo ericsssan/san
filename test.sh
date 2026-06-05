@@ -149,6 +149,7 @@ declare -A EXPECTED=(
     [regex_automata_unchecked]="regex_automata_unchecked"
     [bitvec_unchecked]="bitvec_unchecked"
     [matrixmultiply_unchecked]="matrixmultiply_unchecked"
+    [matrixmultiply_unchecked_safe]=""
     [hashbrown_map_unchecked]="hashbrown_map_unchecked"
     [slab_unchecked]="slab_unchecked"
     [slab_unchecked_safe]=""
