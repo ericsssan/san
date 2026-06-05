@@ -94,6 +94,46 @@ pub struct BlockState {
     /// Mirror of `has_spare` for the `into_inner_unchecked`-style APIs whose
     /// safety condition is "completely full". Join is INTERSECTION.
     pub is_full: HashSet<Local>,
+
+    // ── value-range / scalar-property domain ───────────────────────────────
+    // These fields power suppression for NonZero, NotNan, char-from-u32 etc.
+
+    /// Locals proven ≠ 0 on ALL reaching paths (e.g. `if n != 0`). Join =
+    /// INTERSECTION.  Derived from `nonzero_if_true/false` at `SwitchInt` edges,
+    /// and from `const_lower ≥ 1`.
+    pub nonzero: HashSet<Local>,
+    /// cmp-result → local: cmp = `local != 0` (or `local > 0` etc.).
+    /// True edge of the SwitchInt → nonzero. Join = UNION.
+    pub nonzero_if_true: HashMap<Local, Local>,
+    /// cmp-result → local: cmp = `local == 0`.
+    /// False edge of the SwitchInt → nonzero. Join = UNION.
+    pub nonzero_if_false: HashMap<Local, Local>,
+
+    /// Locals proven not-NaN (is_finite) on ALL reaching paths. Join = INTERSECTION.
+    pub finite: HashSet<Local>,
+    /// cmp-result → float-local: cmp = `is_finite(local)`.
+    /// True edge → finite. Join = UNION.
+    pub finite_if_true: HashMap<Local, Local>,
+    /// cmp-result → float-local: cmp = `is_nan(local)`.
+    /// False edge → finite. Join = UNION.
+    pub nan_if_true: HashMap<Local, Local>,
+
+    /// Proven constant upper bound: `local ≤ bound`. Join = INTERSECTION of
+    /// keys, MAX of values (weaker bound holds on all paths).
+    pub const_upper: HashMap<Local, u64>,
+    /// Proven constant lower bound: `local ≥ bound`. Join = INTERSECTION of
+    /// keys, MIN of values (weaker bound holds on all paths).
+    pub const_lower: HashMap<Local, u64>,
+    /// cmp-result → (local, k): cmp = `local < k`. Drain into `const_upper`
+    /// on the true SwitchInt edge. Join = UNION.
+    pub const_lt: HashMap<Local, (Local, u64)>,
+    /// cmp-result → (local, k): cmp = `local ≤ k`. Join = UNION.
+    pub const_le: HashMap<Local, (Local, u64)>,
+    /// cmp-result → (local, k): cmp = `local > k`. Drain into `const_lower`
+    /// on the true SwitchInt edge. Join = UNION.
+    pub const_gt: HashMap<Local, (Local, u64)>,
+    /// cmp-result → (local, k): cmp = `local ≥ k`. Join = UNION.
+    pub const_ge: HashMap<Local, (Local, u64)>,
 }
 
 impl BlockState {
@@ -294,10 +334,12 @@ impl BlockState {
             }
         }
 
-        // Join has_spare / is_full: INTERSECTION — only proven on ALL paths.
+        // Join has_spare / is_full / nonzero / finite: INTERSECTION.
         for (set_self, set_other) in [
             (&mut result.has_spare, &other.has_spare),
             (&mut result.is_full, &other.is_full),
+            (&mut result.nonzero, &other.nonzero),
+            (&mut result.finite, &other.finite),
         ] {
             let new_set: HashSet<Local> =
                 set_self.iter().copied().filter(|l| set_other.contains(l)).collect();
@@ -305,6 +347,63 @@ impl BlockState {
                 changed = true;
                 *set_self = new_set;
             }
+        }
+
+        // Join value-range aux maps: UNION (same as lt_facts).
+        for (map_self, map_other) in [
+            (&mut result.nonzero_if_true, &other.nonzero_if_true),
+            (&mut result.nonzero_if_false, &other.nonzero_if_false),
+            (&mut result.finite_if_true, &other.finite_if_true),
+            (&mut result.nan_if_true, &other.nan_if_true),
+        ] {
+            for (local, base) in map_other {
+                map_self.entry(*local).or_insert_with(|| {
+                    changed = true;
+                    *base
+                });
+            }
+        }
+        for (map_self, map_other) in [
+            (&mut result.const_lt, &other.const_lt),
+            (&mut result.const_le, &other.const_le),
+            (&mut result.const_gt, &other.const_gt),
+            (&mut result.const_ge, &other.const_ge),
+        ] {
+            for (local, pair) in map_other {
+                map_self.entry(*local).or_insert_with(|| {
+                    changed = true;
+                    *pair
+                });
+            }
+        }
+
+        // Join const_upper: INTERSECTION of keys, MAX of values (weakest bound
+        // that holds on ALL paths).
+        let new_upper: HashMap<Local, u64> = result
+            .const_upper
+            .iter()
+            .filter_map(|(l, &a)| {
+                let b = other.const_upper.get(l)?;
+                Some((*l, a.max(*b)))
+            })
+            .collect();
+        if new_upper != result.const_upper {
+            changed = true;
+            result.const_upper = new_upper;
+        }
+
+        // Join const_lower: INTERSECTION of keys, MIN of values.
+        let new_lower: HashMap<Local, u64> = result
+            .const_lower
+            .iter()
+            .filter_map(|(l, &a)| {
+                let b = other.const_lower.get(l)?;
+                Some((*l, a.min(*b)))
+            })
+            .collect();
+        if new_lower != result.const_lower {
+            changed = true;
+            result.const_lower = new_lower;
         }
 
         (result, changed)
@@ -412,6 +511,47 @@ impl BlockState {
     /// capacity-checked-unchecked checkers (`push_unchecked`, …).
     pub fn collection_has_spare(&self, local: Local) -> bool {
         self.has_spare.contains(&local)
+    }
+
+    /// Returns `true` if `local` is proven ≠ 0 on all reaching paths — either
+    /// by an explicit `!= 0` guard or because its proven lower bound is ≥ 1.
+    pub fn local_is_nonzero(&self, local: Local) -> bool {
+        self.nonzero.contains(&local)
+            || self.const_lower.get(&local).map_or(false, |&lb| lb >= 1)
+    }
+
+    /// Returns `true` if `local` (a float) is proven not-NaN on all reaching
+    /// paths — e.g. guarded by `if !f.is_nan()` or `if f.is_finite()`.
+    pub fn local_is_finite(&self, local: Local) -> bool {
+        self.finite.contains(&local)
+    }
+
+    /// Returns `true` if `local` (a `u32`) is proven to be a valid Unicode
+    /// scalar value on all reaching paths: in range 0x0000..=0xD7FF or
+    /// 0xE000..=0x10FFFF (the two disjoint halves of the valid scalar space
+    /// that exclude the surrogate range 0xD800..=0xDFFF).
+    pub fn local_is_valid_scalar(&self, local: Local) -> bool {
+        let upper = self.const_upper.get(&local).copied();
+        let lower = self.const_lower.get(&local).copied();
+        // Must be within the Unicode range.
+        let in_range = upper.map_or(false, |u| u <= 0x10FFFF);
+        if !in_range {
+            return false;
+        }
+        // Must not overlap the surrogate range [0xD800, 0xDFFF].
+        let below_surrogates = upper.map_or(false, |u| u < 0xD800);  // ≤ 0xD7FF
+        let above_surrogates = lower.map_or(false, |l| l > 0xDFFF);  // ≥ 0xE000
+        below_surrogates || above_surrogates
+    }
+
+    /// Proven constant upper bound for `local` (i.e. `local ≤ bound`), or `None`.
+    pub fn local_upper_bound(&self, local: Local) -> Option<u64> {
+        self.const_upper.get(&local).copied()
+    }
+
+    /// Proven constant lower bound for `local` (i.e. `local ≥ bound`), or `None`.
+    pub fn local_lower_bound(&self, local: Local) -> Option<u64> {
+        self.const_lower.get(&local).copied()
     }
 
     /// Returns `true` if the collection in `local` was proven to be exactly full

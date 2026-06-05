@@ -97,6 +97,9 @@ impl Checker for UnsafeFnCall {
                     if state.local_is_bounded_or_eq(local)
                         || state.collection_has_spare(local)
                         || state.collection_is_full(local)
+                        || state.local_is_nonzero(local)
+                        || state.local_is_finite(local)
+                        || state.local_is_valid_scalar(local)
                     {
                         any_bounded = true;
                     }

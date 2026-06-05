@@ -25,6 +25,7 @@
 ///
 /// Common bugs: integer computations that should never be zero but can be in
 /// edge cases (empty collections, overflows), values from FFI that may be zero.
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -32,12 +33,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct NonZeroNewUnchecked;
 
 impl Checker for NonZeroNewUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -80,6 +81,20 @@ impl Checker for NonZeroNewUnchecked {
             } else {
                 continue;
             };
+
+            // Suppress when the argument is proven ≠ 0 on all reaching paths
+            // (e.g. guarded by `if n != 0`, `if n > 0`, `assert!(n != 0)`).
+            // Only applies to new_unchecked/from_mut_unchecked — unchecked_add/mul
+            // have overflow as an additional condition we cannot prove here.
+            if path.ends_with("::new_unchecked") || path.ends_with("::from_mut_unchecked") {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(arg) = first_arg_local(args) {
+                        if state.local_is_nonzero(arg) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "nonzero_new_unchecked",

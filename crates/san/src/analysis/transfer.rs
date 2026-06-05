@@ -69,6 +69,19 @@ pub fn apply_statement<'tcx>(
     state.full_if_true.remove(&dst_local);
     state.full_if_false.remove(&dst_local);
     state.is_full.remove(&dst_local);
+    // value-range clears
+    state.nonzero.remove(&dst_local);
+    state.nonzero_if_true.remove(&dst_local);
+    state.nonzero_if_false.remove(&dst_local);
+    state.finite.remove(&dst_local);
+    state.finite_if_true.remove(&dst_local);
+    state.nan_if_true.remove(&dst_local);
+    state.const_upper.remove(&dst_local);
+    state.const_lower.remove(&dst_local);
+    state.const_lt.remove(&dst_local);
+    state.const_le.remove(&dst_local);
+    state.const_gt.remove(&dst_local);
+    state.const_ge.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -88,18 +101,28 @@ pub fn apply_statement<'tcx>(
     if let Rvalue::Use(Operand::Move(src) | Operand::Copy(src), _) = rvalue {
         if src.projection.is_empty() {
             let is_move = matches!(rvalue, Rvalue::Use(Operand::Move(_), _));
-            if state.has_spare.contains(&src.local) {
-                state.has_spare.insert(dst_local);
-                if is_move {
-                    state.has_spare.remove(&src.local);
-                }
+            macro_rules! propagate_set {
+                ($field:ident) => {
+                    if state.$field.contains(&src.local) {
+                        state.$field.insert(dst_local);
+                        if is_move { state.$field.remove(&src.local); }
+                    }
+                };
             }
-            if state.is_full.contains(&src.local) {
-                state.is_full.insert(dst_local);
-                if is_move {
-                    state.is_full.remove(&src.local);
-                }
+            macro_rules! propagate_map_u64 {
+                ($field:ident) => {
+                    if let Some(v) = state.$field.get(&src.local).copied() {
+                        state.$field.insert(dst_local, v);
+                        if is_move { state.$field.remove(&src.local); }
+                    }
+                };
             }
+            propagate_set!(has_spare);
+            propagate_set!(is_full);
+            propagate_set!(nonzero);
+            propagate_set!(finite);
+            propagate_map_u64!(const_upper);
+            propagate_map_u64!(const_lower);
         }
     }
 
@@ -471,6 +494,14 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                     // `Lt(len(C), cap(C))` true ⟹ C has spare capacity.
                     record_spare(state, dst_local, op1, op2, true, false);
+                    // `Lt(local, const_k)` → const_lt; `Lt(const_k, local)` → const_gt.
+                    if let (Some(l), Some(k)) = (operand_local(op1), const_u64(op2)) {
+                        state.const_lt.insert(dst_local, (l, k));
+                    }
+                    if let (Some(k), Some(l)) = (const_u64(op1), operand_local(op2)) {
+                        state.const_gt.insert(dst_local, (l, k));
+                        if k == 0 { state.nonzero_if_true.insert(dst_local, l); }
+                    }
                 }
                 BinOp::Ge => {
                     if let Some(lhs) = operand_local(op1) {
@@ -483,6 +514,14 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                     // `!(len(C) >= cap(C))` ⟹ len < cap ⟹ spare on the FALSE edge.
                     record_spare(state, dst_local, op1, op2, false, false);
+                    // `Ge(local, const_k)` → const_ge; `Ge(const_k, local)` → const_le.
+                    if let (Some(l), Some(k)) = (operand_local(op1), const_u64(op2)) {
+                        state.const_ge.insert(dst_local, (l, k));
+                        if k >= 1 { state.nonzero_if_true.insert(dst_local, l); }
+                    }
+                    if let (Some(k), Some(l)) = (const_u64(op1), operand_local(op2)) {
+                        state.const_le.insert(dst_local, (l, k));
+                    }
                 }
                 BinOp::Le => {
                     if let Some(lhs) = operand_local(op1) {
@@ -495,6 +534,14 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                     // `!(cap(C) <= len(C))` ⟹ cap > len ⟹ spare on the FALSE edge.
                     record_spare(state, dst_local, op1, op2, false, true);
+                    // `Le(local, const_k)` → const_le; `Le(const_k, local)` → const_ge.
+                    if let (Some(l), Some(k)) = (operand_local(op1), const_u64(op2)) {
+                        state.const_le.insert(dst_local, (l, k));
+                    }
+                    if let (Some(k), Some(l)) = (const_u64(op1), operand_local(op2)) {
+                        state.const_ge.insert(dst_local, (l, k));
+                        if k >= 1 { state.nonzero_if_true.insert(dst_local, l); }
+                    }
                 }
                 BinOp::Gt => {
                     if let Some(lhs) = operand_local(op1) {
@@ -507,6 +554,14 @@ pub fn apply_statement<'tcx>(
                     state.le_facts.remove(&dst_local);
                     // `Gt(cap(C), len(C))` true ⟹ C has spare capacity.
                     record_spare(state, dst_local, op1, op2, true, true);
+                    // `Gt(local, const_k)` → const_gt; `Gt(const_k, local)` → const_lt.
+                    if let (Some(l), Some(k)) = (operand_local(op1), const_u64(op2)) {
+                        state.const_gt.insert(dst_local, (l, k));
+                        if k == 0 { state.nonzero_if_true.insert(dst_local, l); }
+                    }
+                    if let (Some(k), Some(l)) = (const_u64(op1), operand_local(op2)) {
+                        state.const_lt.insert(dst_local, (l, k));
+                    }
                 }
                 BinOp::Eq => {
                     state.lt_facts.remove(&dst_local);
@@ -515,6 +570,13 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                     // `Eq(len(C), cap(C))` true ⟹ C is exactly full.
                     record_full(state, dst_local, op1, op2, true);
+                    // `Eq(local, 0)` false ⟹ local ≠ 0 (early-return guard).
+                    let l = operand_local(op1).zip(const_u64(op2).filter(|&k| k == 0))
+                        .map(|(l, _)| l)
+                        .or_else(|| {
+                            const_u64(op1).filter(|&k| k == 0).and_then(|_| operand_local(op2))
+                        });
+                    if let Some(l) = l { state.nonzero_if_false.insert(dst_local, l); }
                 }
                 BinOp::Ne => {
                     state.lt_facts.remove(&dst_local);
@@ -523,6 +585,13 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                     // `!(len(C) != cap(C))` ⟹ len == cap ⟹ full on the FALSE edge.
                     record_full(state, dst_local, op1, op2, false);
+                    // `Ne(local, 0)` true ⟹ local ≠ 0.
+                    let l = operand_local(op1).zip(const_u64(op2).filter(|&k| k == 0))
+                        .map(|(l, _)| l)
+                        .or_else(|| {
+                            const_u64(op1).filter(|&k| k == 0).and_then(|_| operand_local(op2))
+                        });
+                    if let Some(l) = l { state.nonzero_if_true.insert(dst_local, l); }
                 }
                 _ => {
                     state.lt_facts.remove(&dst_local);
@@ -728,6 +797,19 @@ pub fn apply_terminator<'tcx>(
             state.full_if_true.remove(&dest);
             state.full_if_false.remove(&dest);
             state.is_full.remove(&dest);
+            // value-range clears for dest
+            state.nonzero.remove(&dest);
+            state.nonzero_if_true.remove(&dest);
+            state.nonzero_if_false.remove(&dest);
+            state.finite.remove(&dest);
+            state.finite_if_true.remove(&dest);
+            state.nan_if_true.remove(&dest);
+            state.const_upper.remove(&dest);
+            state.const_lower.remove(&dest);
+            state.const_lt.remove(&dest);
+            state.const_le.remove(&dest);
+            state.const_gt.remove(&dest);
+            state.const_ge.remove(&dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -740,6 +822,19 @@ pub fn apply_terminator<'tcx>(
                     }
                 }
             }
+            // Record is_nan() / is_finite() results for the `finite` domain.
+            // is_nan(recv) → true if NaN; false → finite (not NaN).
+            // is_finite(recv) → true if finite; false → NaN or infinite.
+            if path.ends_with("::is_nan") {
+                if let Some(recv) = first_arg_local(args) {
+                    state.nan_if_true.insert(dest, recv);
+                }
+            } else if path.ends_with("::is_finite") {
+                if let Some(recv) = first_arg_local(args) {
+                    state.finite_if_true.insert(dest, recv);
+                }
+            }
+
             // Deref/DerefMut yield a view of the receiver collection; carry
             // `ref_base` through so a subsequent `PtrMetadata`/`Len` on the
             // result attributes to the collection (heapless::Vec etc.).
@@ -1321,6 +1416,15 @@ pub fn operand_local<'tcx>(op: &Operand<'tcx>) -> Option<Local> {
     }
 }
 
+/// Extract the value of an integer constant operand as a u64, or `None` if the
+/// operand is not a constant, not an integer, or too large for u64. Used by the
+/// const-bound and nonzero/valid-scalar fact recording.
+pub fn const_u64(op: &Operand<'_>) -> Option<u64> {
+    let Operand::Constant(c) = op else { return None };
+    let si = c.const_.try_to_scalar_int()?;
+    si.to_bits(si.size()).try_into().ok()
+}
+
 /// Refine `state` along the CFG edge from a `SwitchInt` terminator into `succ`,
 /// using any comparison fact recorded for the switched-on discriminant.
 ///
@@ -1367,6 +1471,33 @@ pub fn refine_switchint_edge<'tcx>(
         if let Some(&coll) = state.full_if_true.get(&discr_local) {
             state.is_full.insert(coll);
         }
+        // value-range: nonzero, finite, const bounds
+        if let Some(&l) = state.nonzero_if_true.get(&discr_local) {
+            state.nonzero.insert(l);
+        }
+        if let Some(&l) = state.finite_if_true.get(&discr_local) {
+            state.finite.insert(l);
+        }
+        if let Some(&(l, k)) = state.const_lt.get(&discr_local) {
+            // l < k → l ≤ k-1
+            let ub = k.saturating_sub(1);
+            let e = state.const_upper.entry(l).or_insert(u64::MAX);
+            *e = (*e).min(ub);
+        }
+        if let Some(&(l, k)) = state.const_le.get(&discr_local) {
+            let e = state.const_upper.entry(l).or_insert(u64::MAX);
+            *e = (*e).min(k);
+        }
+        if let Some(&(l, k)) = state.const_gt.get(&discr_local) {
+            // l > k → l ≥ k+1
+            let lb = k.saturating_add(1);
+            let e = state.const_lower.entry(l).or_insert(0);
+            *e = (*e).max(lb);
+        }
+        if let Some(&(l, k)) = state.const_ge.get(&discr_local) {
+            let e = state.const_lower.entry(l).or_insert(0);
+            *e = (*e).max(k);
+        }
     } else {
         // Discriminant zero → the comparison was false (take the negation).
         if let Some(&lhs) = state.ge_facts.get(&discr_local) {
@@ -1380,6 +1511,36 @@ pub fn refine_switchint_edge<'tcx>(
         }
         if let Some(&coll) = state.full_if_false.get(&discr_local) {
             state.is_full.insert(coll);
+        }
+        // value-range negations
+        if let Some(&l) = state.nonzero_if_false.get(&discr_local) {
+            state.nonzero.insert(l);
+        }
+        if let Some(&l) = state.nan_if_true.get(&discr_local) {
+            // NOT is_nan → finite
+            state.finite.insert(l);
+        }
+        // NOT(l < k) → l ≥ k
+        if let Some(&(l, k)) = state.const_lt.get(&discr_local) {
+            let e = state.const_lower.entry(l).or_insert(0);
+            *e = (*e).max(k);
+        }
+        // NOT(l ≤ k) → l > k → l ≥ k+1
+        if let Some(&(l, k)) = state.const_le.get(&discr_local) {
+            let lb = k.saturating_add(1);
+            let e = state.const_lower.entry(l).or_insert(0);
+            *e = (*e).max(lb);
+        }
+        // NOT(l > k) → l ≤ k
+        if let Some(&(l, k)) = state.const_gt.get(&discr_local) {
+            let e = state.const_upper.entry(l).or_insert(u64::MAX);
+            *e = (*e).min(k);
+        }
+        // NOT(l ≥ k) → l < k → l ≤ k-1
+        if let Some(&(l, k)) = state.const_ge.get(&discr_local) {
+            let ub = k.saturating_sub(1);
+            let e = state.const_upper.entry(l).or_insert(u64::MAX);
+            *e = (*e).min(ub);
         }
     }
 }
