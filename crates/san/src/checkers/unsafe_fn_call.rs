@@ -101,6 +101,7 @@ impl Checker for UnsafeFnCall {
                         || state.local_is_finite(local)
                         || state.local_is_valid_scalar(local)
                         || state.fd_was_transferred(local)
+                        || state.index_is_fully_bounded(local)
                     {
                         any_bounded = true;
                     }

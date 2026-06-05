@@ -1,6 +1,6 @@
 use rustc_middle::mir::{
-    BasicBlock, BinOp, Body, CastKind, Local, Operand, ProjectionElem, Rvalue, Statement,
-    StatementKind, Terminator, TerminatorKind,
+    AggregateKind, BasicBlock, BinOp, Body, CastKind, Local, Operand, ProjectionElem, Rvalue,
+    Statement, StatementKind, Terminator, TerminatorKind,
 };
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{TyCtxt, TyKind};
@@ -84,6 +84,7 @@ pub fn apply_statement<'tcx>(
     state.const_ge.remove(&dst_local);
     state.fd_origin.remove(&dst_local);
     state.fd_consumed.remove(&dst_local);
+    state.array_components.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -125,6 +126,10 @@ pub fn apply_statement<'tcx>(
             propagate_set!(finite);
             propagate_set!(fd_origin);
             propagate_set!(fd_consumed);
+            if let Some(comps) = state.array_components.get(&src.local).cloned() {
+                state.array_components.insert(dst_local, comps);
+                if is_move { state.array_components.remove(&src.local); }
+            }
             propagate_map_u64!(const_upper);
             propagate_map_u64!(const_lower);
         }
@@ -411,7 +416,7 @@ pub fn apply_statement<'tcx>(
         // wrapping an `into_raw` pointer is not falsely reported as a leak. For example,
         // `Box::into_raw(b).cast()` stored in a `NonNull` field and returned as part of
         // `RawTask { ptr: nonull }` must show the owned object in the return value.
-        Rvalue::Aggregate(_, operands) => {
+        Rvalue::Aggregate(kind, operands) => {
             let agg_objs: std::collections::BTreeSet<_> = operands
                 .iter()
                 .filter_map(|op| match op {
@@ -436,6 +441,27 @@ pub fn apply_statement<'tcx>(
             state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
             state.bounded_or_eq.remove(&dst_local);
+            // Multi-dimensional index decomposition: record component locals for
+            // array/tuple aggregates (e.g. `[i, j]` or `(i, j)`) so ndarray/simd
+            // checkers can verify each scalar component against `bounded`.
+            // Only record when ALL operands are projection-free locals — if any
+            // component is a constant or projected place, leave it as unknown.
+            if matches!(**kind, AggregateKind::Array(_) | AggregateKind::Tuple) {
+                let components: Option<Vec<Local>> = operands
+                    .iter()
+                    .map(|op| match op {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                            Some(p.local)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(comps) = components {
+                    if !comps.is_empty() {
+                        state.array_components.insert(dst_local, comps);
+                    }
+                }
+            }
         }
         // Pointer-identity casts (PtrToPtr, Transmute) preserve the allocation
         // the pointer refers into — dst points to the same objects as src. This
@@ -816,6 +842,7 @@ pub fn apply_terminator<'tcx>(
             state.const_ge.remove(&dest);
             state.fd_origin.remove(&dest);
             state.fd_consumed.remove(&dest);
+            state.array_components.remove(&dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {

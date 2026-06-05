@@ -130,6 +130,7 @@ declare -A EXPECTED=(
     [push_unchecked]="push_unchecked"
     [push_unchecked_safe]=""
     [ndarray_unchecked]="ndarray_unchecked"
+    [ndarray_unchecked_safe]=""
     [hashbrown_raw]="hashbrown_raw"
     [smallvec_unchecked]="smallvec_unchecked"
     [smallvec_unchecked_safe]=""

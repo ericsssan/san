@@ -27,21 +27,32 @@
 ///   • Parallel (rayon) iterations over overlapping sliced views that both
 ///     call `uget_mut` → data race (UB) even if the indices look distinct
 ///
+/// Flow suppression: `uget([i, j])` is suppressed when the index was built from
+/// an `[i, j]` / `(i, j)` aggregate whose every component local is proven
+/// bounded (< something) on ALL reaching paths — e.g. from explicit
+/// `if i < arr.nrows() && j < arr.ncols()` guards. 1D indexing is suppressed
+/// when the scalar index local is bounded.
+///
 /// Safe alternative: index via `array[[i, j]]` or `array.get(index)`
 /// (returns `Option<&T>`).
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct NdarrayUnchecked;
 
 impl Checker for NdarrayUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -50,30 +61,87 @@ impl Checker for NdarrayUnchecked {
                 continue;
             }
 
-            let (fn_name, note) = if path.ends_with("::uget_mut") {
-                (
-                    "ArrayBase::uget_mut",
-                    "each index component must be < the corresponding dimension; \
-                     out-of-bounds index reads/writes outside the allocation (UB); \
-                     additionally, no other reference to the same element may exist \
-                     while this mutable reference is live (aliased &mut is UB); \
-                     use array[[i, j]] for the checked panicking version",
-                )
-            } else if path.ends_with("::uget") {
-                (
-                    "ArrayBase::uget",
-                    "each index component must be < the corresponding array dimension; \
-                     out-of-bounds index reads memory past the array's allocation (UB); \
-                     use array[[i, j]] or array.get(index) (returns Option<&T>)",
-                )
-            } else if path.ends_with("::uswap") {
-                (
-                    "ArrayBase::uswap",
-                    "both index1 and index2 must be in-bounds for all dimensions; \
-                     out-of-bounds index swaps memory outside the array allocation (UB); \
-                     use array.swap(i, j) for the checked panicking version",
-                )
-            } else if path.ends_with("::from_shape_vec_unchecked") {
+            let span = terminator.source_info.span;
+
+            // ── uget / uget_mut: suppress if every index component is bounded ──
+            if path.ends_with("::uget") || path.ends_with("::uget_mut") {
+                // args[0] = receiver, args[1] = index
+                let idx_local = args.get(1).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(p.local)
+                    }
+                    _ => None,
+                });
+                if let Some(idx) = idx_local {
+                    if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                        if state.index_is_fully_bounded(idx) {
+                            continue;
+                        }
+                    }
+                }
+
+                let (fn_name, note) = if path.ends_with("::uget_mut") {
+                    (
+                        "ArrayBase::uget_mut",
+                        "each index component must be < the corresponding dimension; \
+                         out-of-bounds index reads/writes outside the allocation (UB); \
+                         additionally, no other reference to the same element may exist \
+                         while this mutable reference is live (aliased &mut is UB); \
+                         use array[[i, j]] for the checked panicking version",
+                    )
+                } else {
+                    (
+                        "ArrayBase::uget",
+                        "each index component must be < the corresponding array dimension; \
+                         out-of-bounds index reads memory past the array's allocation (UB); \
+                         use array[[i, j]] or array.get(index) (returns Option<&T>)",
+                    )
+                };
+                findings.push(Finding {
+                    rule_id: "ndarray_unchecked",
+                    severity: Severity::Warning,
+                    span,
+                    message: format!("`{fn_name}` — {note}"),
+                });
+                continue;
+            }
+
+            // ── uswap: suppress if BOTH index arguments have all components bounded ──
+            if path.ends_with("::uswap") {
+                let idx1 = args.get(1).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(p.local)
+                    }
+                    _ => None,
+                });
+                let idx2 = args.get(2).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(p.local)
+                    }
+                    _ => None,
+                });
+                if let (Some(i1), Some(i2)) = (idx1, idx2) {
+                    if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                        if state.index_is_fully_bounded(i1) && state.index_is_fully_bounded(i2) {
+                            continue;
+                        }
+                    }
+                }
+
+                findings.push(Finding {
+                    rule_id: "ndarray_unchecked",
+                    severity: Severity::Warning,
+                    span,
+                    message: "ArrayBase::uswap — both index1 and index2 must be in-bounds for \
+                        all dimensions; out-of-bounds index swaps memory outside the array \
+                        allocation (UB); use array.swap(i, j) for the checked panicking version"
+                        .to_string(),
+                });
+                continue;
+            }
+
+            // ── from_shape_vec_unchecked / from_shape_ptr: pattern-match only ──
+            let (fn_name, note) = if path.ends_with("::from_shape_vec_unchecked") {
                 (
                     "ArrayBase::from_shape_vec_unchecked",
                     "shape.size() must equal v.len(); if the shape product does not match \
@@ -95,7 +163,7 @@ impl Checker for NdarrayUnchecked {
             findings.push(Finding {
                 rule_id: "ndarray_unchecked",
                 severity: Severity::Warning,
-                span: terminator.source_info.span,
+                span,
                 message: format!("`{fn_name}` — {note}"),
             });
         }

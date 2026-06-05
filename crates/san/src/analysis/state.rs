@@ -135,6 +135,14 @@ pub struct BlockState {
     /// cmp-result → (local, k): cmp = `local ≥ k`. Join = UNION.
     pub const_ge: HashMap<Local, (Local, u64)>,
 
+    // ── multi-dimensional index domain ─────────────────────────────────────
+    /// Maps an array/tuple aggregate local to the ordered list of component
+    /// locals it was built from: `_idx = [i, j]` → `array_components[_idx] = [i, j]`.
+    /// Only populated when ALL operands are plain (projection-free) locals.
+    /// Used to decompose ndarray and simd indices into scalar components that
+    /// can each be checked against `bounded`. Join = UNION.
+    pub array_components: HashMap<Local, Vec<Local>>,
+
     // ── fd-lifecycle / I/O-safety domain ───────────────────────────────────
     /// Locals whose integer value was produced by `into_raw_fd/socket/handle`.
     /// Suppresses `from_raw_fd` for the canonical transfer pattern (safe).
@@ -419,6 +427,14 @@ impl BlockState {
             result.const_lower = new_lower;
         }
 
+        // array_components: UNION — keep decomposition info from either branch.
+        for (local, comps) in &other.array_components {
+            result.array_components.entry(*local).or_insert_with(|| {
+                changed = true;
+                comps.clone()
+            });
+        }
+
         // fd_origin: INTERSECTION — only suppress transfer pattern if proven on ALL paths.
         let new_fd_origin: HashSet<Local> = result
             .fd_origin.iter().copied().filter(|l| other.fd_origin.contains(l)).collect();
@@ -601,6 +617,26 @@ impl BlockState {
     /// not a tracked reborrow.
     pub fn deref_base(&self, local: Local) -> Local {
         self.ref_base.get(&local).copied().unwrap_or(local)
+    }
+
+    /// Returns the ordered component locals for an array/tuple aggregate, or
+    /// `None` if `local` was not recorded as an aggregate with all-local elements.
+    /// Used to decompose multi-dimensional ndarray/simd index locals into scalar
+    /// components that can each be checked with `local_is_bounded`.
+    pub fn array_components_of(&self, local: Local) -> Option<&Vec<Local>> {
+        self.array_components.get(&local)
+    }
+
+    /// Returns `true` if `local` is a fully bounded index on ALL reaching paths:
+    /// either a directly bounded scalar (`local_is_bounded`) or an array/tuple
+    /// aggregate whose every component local is bounded. Drives suppression in
+    /// the `unsafe_fn_call` backstop for multi-dimensional APIs like ndarray `uget`.
+    pub fn index_is_fully_bounded(&self, local: Local) -> bool {
+        if let Some(components) = self.array_components.get(&local) {
+            !components.is_empty() && components.iter().all(|&c| self.local_is_bounded(c))
+        } else {
+            self.local_is_bounded(local)
+        }
     }
 
     /// Returns `true` if `local` holds a raw fd integer produced by
