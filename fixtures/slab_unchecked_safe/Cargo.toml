@@ -1,0 +1,9 @@
+[package]
+name = "slab_unchecked_safe"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+slab = "0.4"

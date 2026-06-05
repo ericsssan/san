@@ -108,6 +108,18 @@ impl Checker for UnsafeFnCall {
                 }
                 if uaf_found { continue; }
                 if any_bounded { continue; }
+                // Pairwise disequality: for two-key APIs like `get2_unchecked_mut`,
+                // suppress if any two arg locals are proven ≠ (aliasing impossible).
+                let arg_locals: Vec<_> = args.iter().filter_map(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(p.local)
+                    }
+                    _ => None,
+                }).collect();
+                let any_ne_pair = arg_locals.iter().enumerate().any(|(i, &a)| {
+                    arg_locals[..i].iter().any(|&b| state.locals_are_ne(a, b))
+                });
+                if any_ne_pair { continue; }
                 // For calls on tracked pointers where a specific checker handles the
                 // lifecycle, suppress the generic backstop to avoid redundant audit noise.
                 if any_tracked

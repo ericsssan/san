@@ -151,6 +151,7 @@ declare -A EXPECTED=(
     [matrixmultiply_unchecked]="matrixmultiply_unchecked"
     [hashbrown_map_unchecked]="hashbrown_map_unchecked"
     [slab_unchecked]="slab_unchecked"
+    [slab_unchecked_safe]=""
     [slotmap_unchecked]="slotmap_unchecked"
     [psm_unsafe]="psm_unsafe"
     [arrayvec_unchecked]="arrayvec_unchecked"

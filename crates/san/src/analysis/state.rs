@@ -135,6 +135,20 @@ pub struct BlockState {
     /// cmp-result → (local, k): cmp = `local ≥ k`. Join = UNION.
     pub const_ge: HashMap<Local, (Local, u64)>,
 
+    // ── local-pair disequality domain ──────────────────────────────────────
+    /// `cmp_local → (a, b)`: `cmp = Ne(a, b)` where both are plain locals.
+    /// True SwitchInt edge drains into `keys_are_ne`. Join = UNION.
+    pub ne_pair_if_true: HashMap<Local, (Local, Local)>,
+    /// `cmp_local → (a, b)`: `cmp = Eq(a, b)` where both are plain locals.
+    /// False SwitchInt edge drains into `keys_are_ne`. Join = UNION.
+    pub eq_pair_if_true: HashMap<Local, (Local, Local)>,
+    /// Canonical pairs (a.index() ≤ b.index()) of locals proven ≠ on ALL
+    /// reaching paths — from explicit `if a != b` or `if a == b { return }`.
+    /// Drives suppression of `Slab::get2_unchecked_mut` when the two keys are
+    /// provably disjoint. Join = INTERSECTION. Cleared when either local is
+    /// reassigned.
+    pub keys_are_ne: HashSet<(Local, Local)>,
+
     // ── multi-dimensional index domain ─────────────────────────────────────
     /// Maps an array/tuple aggregate local to the ordered list of component
     /// locals it was built from: `_idx = [i, j]` → `array_components[_idx] = [i, j]`.
@@ -427,6 +441,22 @@ impl BlockState {
             result.const_lower = new_lower;
         }
 
+        // ne_pair_if_true / eq_pair_if_true: UNION.
+        for (local, pair) in &other.ne_pair_if_true {
+            result.ne_pair_if_true.entry(*local).or_insert_with(|| { changed = true; *pair });
+        }
+        for (local, pair) in &other.eq_pair_if_true {
+            result.eq_pair_if_true.entry(*local).or_insert_with(|| { changed = true; *pair });
+        }
+
+        // keys_are_ne: INTERSECTION — only suppress if ≠ is proven on ALL paths.
+        let new_ne: HashSet<(Local, Local)> = result
+            .keys_are_ne.iter().copied().filter(|p| other.keys_are_ne.contains(p)).collect();
+        if new_ne != result.keys_are_ne {
+            changed = true;
+            result.keys_are_ne = new_ne;
+        }
+
         // array_components: UNION — keep decomposition info from either branch.
         for (local, comps) in &other.array_components {
             result.array_components.entry(*local).or_insert_with(|| {
@@ -617,6 +647,14 @@ impl BlockState {
     /// not a tracked reborrow.
     pub fn deref_base(&self, local: Local) -> Local {
         self.ref_base.get(&local).copied().unwrap_or(local)
+    }
+
+    /// Returns `true` if `a` and `b` are proven ≠ on ALL reaching paths — e.g.
+    /// from an explicit `if key1 != key2` guard. Used to suppress
+    /// `Slab::get2_unchecked_mut` when the two keys are provably disjoint.
+    pub fn locals_are_ne(&self, a: Local, b: Local) -> bool {
+        let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        self.keys_are_ne.contains(&pair)
     }
 
     /// Returns the ordered component locals for an array/tuple aggregate, or

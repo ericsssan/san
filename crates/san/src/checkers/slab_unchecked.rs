@@ -22,18 +22,23 @@
 /// Safe alternatives: `slab.get_mut(key)` (returns Option, panics-free),
 /// or split the borrows explicitly with sequential lookups.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct SlabUnchecked;
 
 impl Checker for SlabUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -43,6 +48,21 @@ impl Checker for SlabUnchecked {
             }
 
             if path.ends_with("::get2_unchecked_mut") {
+                // Suppress when key1 ≠ key2 is proven (aliasing cannot occur).
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    let key = |idx: usize| args.get(idx).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                            Some(p.local)
+                        }
+                        _ => None,
+                    });
+                    if let (Some(k1), Some(k2)) = (key(1), key(2)) {
+                        if state.locals_are_ne(k1, k2) {
+                            continue;
+                        }
+                    }
+                }
+
                 findings.push(Finding {
                     rule_id: "slab_unchecked",
                     severity: Severity::Warning,

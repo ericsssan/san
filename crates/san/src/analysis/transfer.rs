@@ -85,6 +85,9 @@ pub fn apply_statement<'tcx>(
     state.fd_origin.remove(&dst_local);
     state.fd_consumed.remove(&dst_local);
     state.array_components.remove(&dst_local);
+    state.ne_pair_if_true.remove(&dst_local);
+    state.eq_pair_if_true.remove(&dst_local);
+    state.keys_are_ne.retain(|&(a, b)| a != dst_local && b != dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -607,6 +610,10 @@ pub fn apply_statement<'tcx>(
                             const_u64(op1).filter(|&k| k == 0).and_then(|_| operand_local(op2))
                         });
                     if let Some(l) = l { state.nonzero_if_false.insert(dst_local, l); }
+                    // `Eq(a, b)` false ⟹ a ≠ b (both plain locals).
+                    if let (Some(a), Some(b)) = (operand_local(op1), operand_local(op2)) {
+                        state.eq_pair_if_true.insert(dst_local, (a, b));
+                    }
                 }
                 BinOp::Ne => {
                     state.lt_facts.remove(&dst_local);
@@ -622,6 +629,10 @@ pub fn apply_statement<'tcx>(
                             const_u64(op1).filter(|&k| k == 0).and_then(|_| operand_local(op2))
                         });
                     if let Some(l) = l { state.nonzero_if_true.insert(dst_local, l); }
+                    // `Ne(a, b)` true ⟹ a ≠ b (both plain locals).
+                    if let (Some(a), Some(b)) = (operand_local(op1), operand_local(op2)) {
+                        state.ne_pair_if_true.insert(dst_local, (a, b));
+                    }
                 }
                 _ => {
                     state.lt_facts.remove(&dst_local);
@@ -843,6 +854,9 @@ pub fn apply_terminator<'tcx>(
             state.fd_origin.remove(&dest);
             state.fd_consumed.remove(&dest);
             state.array_components.remove(&dest);
+            state.ne_pair_if_true.remove(&dest);
+            state.eq_pair_if_true.remove(&dest);
+            state.keys_are_ne.retain(|&(a, b)| a != dest && b != dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -1548,6 +1562,11 @@ pub fn refine_switchint_edge<'tcx>(
             let e = state.const_lower.entry(l).or_insert(0);
             *e = (*e).max(k);
         }
+        // `Ne(a, b)` true ⟹ a ≠ b.
+        if let Some(&(a, b)) = state.ne_pair_if_true.get(&discr_local) {
+            let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
+            state.keys_are_ne.insert(pair);
+        }
     } else {
         // Discriminant zero → the comparison was false (take the negation).
         if let Some(&lhs) = state.ge_facts.get(&discr_local) {
@@ -1591,6 +1610,11 @@ pub fn refine_switchint_edge<'tcx>(
             let ub = k.saturating_sub(1);
             let e = state.const_upper.entry(l).or_insert(u64::MAX);
             *e = (*e).min(ub);
+        }
+        // `Eq(a, b)` false ⟹ a ≠ b.
+        if let Some(&(a, b)) = state.eq_pair_if_true.get(&discr_local) {
+            let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
+            state.keys_are_ne.insert(pair);
         }
     }
 }
