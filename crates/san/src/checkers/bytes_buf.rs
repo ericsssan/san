@@ -43,13 +43,6 @@ impl Checker for BytesBuf {
                      cnt must be <= remaining_mut(); prefer put_slice/put_bytes which write and \
                      advance atomically",
                 )
-            } else if path.ends_with("::set_len") && path.contains("bytes") {
-                (
-                    "BytesMut::set_len",
-                    "sets buffer length without initializing bytes; if len > capacity this \
-                     writes into unallocated memory (OOB, UB); if len > current_len without \
-                     initialization, future reads access uninitialized memory (UB)",
-                )
             } else if path.ends_with("::from_raw_parts_mut") && path.contains("UninitSlice") {
                 (
                     "UninitSlice::from_raw_parts_mut",

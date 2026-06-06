@@ -55,12 +55,6 @@ impl Checker for RkyvUnchecked {
                      initialized data; misaligned or invalid bytes are immediate UB; validate \
                      with `rkyv::access` (returns Result) before accessing untrusted archived data",
                 )
-            } else if path.ends_with("::from_bytes_unchecked") && path.contains("rkyv") {
-                (
-                    "rkyv::from_bytes_unchecked",
-                    "reinterprets raw bytes as an archived type without any validation; \
-                     caller must guarantee alignment, initialized memory, and valid archived layout",
-                )
             } else if path.ends_with("::archived_root_mut") {
                 (
                     "rkyv::archived_root_mut",

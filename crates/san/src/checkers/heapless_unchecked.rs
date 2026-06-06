@@ -58,13 +58,6 @@ impl Checker for HeaplessUnchecked {
                      end of the inline array (OOB, immediate UB); use swap_remove() which \
                      panics on out-of-bounds",
                 )
-            } else if path.ends_with("::set_len") {
-                (
-                    "heapless::Vec::set_len",
-                    "new_len must be ≤ N (compile-time capacity) and all elements in \
-                     old_len..new_len must be initialized; uninitialized elements are dropped \
-                     when the Vec is dropped (reads from uninit bytes, UB)",
-                )
             } else if path.ends_with("::push_front_unchecked") {
                 (
                     "heapless::Deque::push_front_unchecked",
@@ -120,12 +113,6 @@ impl Checker for HeaplessUnchecked {
                 if spare_api {
                     if let Some(recv) = first_arg_local(args) {
                         if state.collection_has_spare(recv) {
-                            continue;
-                        }
-                    }
-                } else if path.ends_with("::set_len") {
-                    if let Some(n) = args.get(1).and_then(|a| operand_local(&a.node)) {
-                        if state.local_is_bounded_or_eq(n) {
                             continue;
                         }
                     }

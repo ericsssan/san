@@ -1,5 +1,5 @@
-/// Detects calls to `Vec::set_len` — a highly unsafe operation that bypasses
-/// all of Rust's safety guarantees around collection length.
+/// Detects calls to `set_len` on any collection type — a highly unsafe operation
+/// that bypasses all of Rust's safety guarantees around collection length.
 ///
 /// Callers must ensure:
 ///   1. `new_len <= capacity()`
@@ -24,7 +24,7 @@ impl Checker for VecSetLen {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("vec::") || !path.ends_with("::set_len") {
+            if !path.ends_with("::set_len") {
                 continue;
             }
 
@@ -50,7 +50,7 @@ impl Checker for VecSetLen {
                 rule_id: "vec_set_len",
                 severity: Severity::Warning,
                 span: terminator.source_info.span,
-                message: "`Vec::set_len` bypasses Rust's safety checks — verify that \
+                message: "`set_len` bypasses Rust's safety checks — verify that \
                           new_len ≤ capacity() and all elements in old_len..new_len \
                           are fully initialized"
                     .to_string(),

@@ -1,26 +1,26 @@
-/// Detects calls to `<[T]>::get_disjoint_unchecked_mut` (stable since Rust 1.87).
+/// Detects calls to any function that returns N simultaneous mutable references
+/// without checking that the keys/indices are pairwise distinct.
 ///
-/// `get_disjoint_unchecked_mut([i, j, ...])` returns N simultaneous mutable
-/// references into the slice at the specified indices. The checked version
-/// (`get_disjoint_mut`) returns `Err` if any index is out of bounds or if
-/// any two indices are equal. The unchecked variant skips both checks.
+/// Covers all container types regardless of crate:
+///   • `get_disjoint_unchecked_mut([i, j, …])` — slice, HashMap, slotmap, and
+///     any other type with this API: indices/keys must be in-bounds (for slices)
+///     and pairwise distinct
+///   • `get2_unchecked_mut(k1, k2)` — two-argument variant (slab, etc.): both
+///     keys must be valid entries and distinct
+///   • `get_many_unchecked_mut([&k1, &k2, …])` / `get_many_key_value_unchecked_mut`
+///     — N-key variants: all keys must be pairwise distinct
 ///
-/// The caller must guarantee:
-///   • All indices are within `[0, self.len())` — an out-of-bounds index
-///     creates a reference to memory past the end of the slice's allocation
-///     (OOB write/read UB)
-///   • All indices are pairwise distinct — duplicate indices yield two `&mut T`
-///     references to the same memory location, which is aliased `&mut T` (UB);
-///     the optimizer exploits the noalias annotation and may miscompile both uses
+/// In every case, duplicate keys produce two `&mut T` references aliasing the
+/// same memory location — immediate UB. The optimizer exploits the `noalias`
+/// annotation on mutable references and may silently miscompile code that
+/// violates this invariant.
 ///
-/// Common bugs: constructing indices from user input or computed offsets without
-/// bounds-checking, accidentally duplicating an index (e.g. when building index
-/// arrays programmatically).
-///
-/// Safe alternative: `<[T]>::get_disjoint_mut` (stable since Rust 1.87), which
-/// returns `Err(GetDisjointMutError)` on bounds or overlap violations.
-///
-/// Stable since Rust 1.87.
+/// Flow-sensitive suppression:
+///   • For slice `get_disjoint_unchecked_mut`: suppress when all index components
+///     are provably in-bounds (bounded domain) AND pairwise distinct (keys_are_ne)
+///   • For key-based variants: suppress when all keys are pairwise distinct
+///     (keys_are_ne domain — populated by `if k1 != k2` / `if k1 == k2 { return }`
+///     guards; looks through integer casts and reference indirection)
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -42,49 +42,73 @@ impl Checker for SliceDisjointUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            // Only the slice primitive implementation; not HashMap, slotmap, etc.
-            // (those have dedicated checkers with their own suppression logic).
-            if !path.ends_with("get_disjoint_unchecked_mut")
-                || path.contains("HashMap")
-                || path.contains("slotmap")
-            {
+
+            let is_disjoint_mut = path.ends_with("get_disjoint_unchecked_mut");
+            let is_key_disjoint = path.ends_with("::get2_unchecked_mut")
+                || path.ends_with("::get_many_unchecked_mut")
+                || path.ends_with("::get_many_key_value_unchecked_mut");
+
+            if !is_disjoint_mut && !is_key_disjoint {
                 continue;
             }
 
-            // Suppress when all index components are provably in-bounds AND
-            // pairwise distinct: `if i < len && j < len && i != j { ... }`.
-            // arg[0] = &mut self (the slice); arg[1] = [i, j, ...] index array.
-            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                if let Some(arr_local) = args.get(1).and_then(|a| match &a.node {
-                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
-                        Some(p.local)
-                    }
+            let arg_local = |idx: usize| -> Option<rustc_middle::mir::Local> {
+                args.get(idx).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
                     _ => None,
-                }) {
-                    if let Some(components) = state.array_components_of(arr_local) {
-                        if !components.is_empty() {
-                            let all_bounded = components.iter().all(|&c| state.index_is_fully_bounded(c));
-                            let all_ne = components.len() <= 1
-                                || components.iter().enumerate().all(|(i, &a)| {
-                                    components[..i].iter().all(|&b| state.locals_are_ne(a, b))
-                                });
-                            if all_bounded && all_ne {
-                                continue;
-                            }
+                })
+            };
+
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                // Array-based: arg[1] is [K; N] — covers slice, slotmap, hashmap get_many.
+                // For integer index types (usize/isize), require bounds AND ne (OOB possible).
+                // For opaque key types (struct keys), ne alone is sufficient.
+                let array_suppressed = arg_local(1)
+                    .and_then(|arr| state.array_components_of(arr))
+                    .map(|comps| {
+                        if comps.len() <= 1 { return false; }
+                        let all_ne = comps.iter().enumerate().all(|(i, &a)| {
+                            comps[..i].iter().all(|&b| state.locals_are_ne(a, b))
+                        });
+                        if !all_ne { return false; }
+                        // Check if components are integer types (require bounds for those).
+                        let any_int = comps.iter().any(|&c| {
+                            matches!(body.local_decls[c].ty.kind(),
+                                rustc_middle::ty::TyKind::Uint(_) | rustc_middle::ty::TyKind::Int(_))
+                        });
+                        if any_int {
+                            comps.iter().all(|&c| state.index_is_fully_bounded(c))
+                        } else {
+                            true // struct keys: ne is sufficient
                         }
-                    }
+                    })
+                    .unwrap_or(false);
+
+                // Individual-arg: get2_unchecked_mut(self, k1, k2) — arg[1] and arg[2].
+                let individual_suppressed = is_key_disjoint && !array_suppressed
+                    && arg_local(1).zip(arg_local(2))
+                        .map_or(false, |(a, b)| state.locals_are_ne(a, b));
+
+                if array_suppressed || individual_suppressed {
+                    continue;
                 }
             }
 
+            let message = if is_disjoint_mut {
+                "all indices must be in-bounds (< self.len()) and pairwise distinct; \
+                 duplicate indices produce aliased `&mut T` references (immediate UB); \
+                 use the checked variant (returns Err/None on overlap)"
+            } else {
+                "all keys must be pairwise distinct; duplicate keys produce aliased \
+                 `&mut T` references (immediate UB); use the checked variant (returns \
+                 Err/None on duplicate keys)"
+            };
+
             findings.push(Finding {
-                rule_id: "slice_disjoint_unchecked",
+                rule_id: "disjoint_unchecked_mut",
                 severity: Severity::Warning,
                 span: terminator.source_info.span,
-                message: "`get_disjoint_unchecked_mut` — all indices must be in-bounds \
-                          (< slice.len()) and pairwise distinct; duplicate indices produce \
-                          aliased `&mut T` references (immediate UB); use \
-                          `get_disjoint_mut` for the checked version"
-                    .to_string(),
+                message: format!("`{}` — {message}", path.rsplit("::").next().unwrap_or(&path)),
             });
         }
 

@@ -27,7 +27,7 @@
 /// These APIs are present in hashbrown 0.15+ and re-exported into
 /// `std::collections::HashMap` in recent nightly builds.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, Operand, TerminatorKind};
+use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct HashbrownMapUnchecked;
@@ -37,13 +37,13 @@ impl Checker for HashbrownMapUnchecked {
         &self,
         tcx: TyCtxt<'tcx>,
         body: &Body<'tcx>,
-        flow: &crate::analysis::FlowResults,
+        _flow: &crate::analysis::FlowResults,
     ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
+        for block_data in body.basic_blocks.iter() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -68,20 +68,6 @@ impl Checker for HashbrownMapUnchecked {
                      two entries with the same key are created, causing future lookups to return \
                      either one (logical UB); use insert() or entry() instead",
                 )
-            } else if path.ends_with("::get_many_unchecked_mut") {
-                (
-                    "get_many_unchecked_mut",
-                    "returns N mutable references without verifying that keys/indices are distinct; \
-                     duplicate keys produce aliased &mut references to the same value (immediate UB); \
-                     use get_many_mut() which checks for duplicates and returns None on conflict",
-                )
-            } else if path.ends_with("::get_many_key_value_unchecked_mut") {
-                (
-                    "get_many_key_value_unchecked_mut",
-                    "returns N mutable value references alongside key references without checking \
-                     for duplicate keys; duplicate keys produce aliased &mut V (immediate UB); \
-                     use get_many_key_value_mut() for the checked alternative",
-                )
             } else if path.ends_with("::replace_key_unchecked")
                 && path.contains("hashbrown")
             {
@@ -96,32 +82,6 @@ impl Checker for HashbrownMapUnchecked {
             } else {
                 continue;
             };
-
-            // get_many_unchecked_mut / get_many_key_value_unchecked_mut:
-            // suppress when all key components are pairwise locally-distinct.
-            // arg[0] = &mut self; arg[1] = [&k1, &k2, ...] key ref array.
-            // locals_are_ne looks through ref_base so &k refs resolve to k locals.
-            if fn_name.starts_with("get_many") {
-                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                    if let Some(arr_local) = args.get(1).and_then(|a| match &a.node {
-                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
-                            Some(p.local)
-                        }
-                        _ => None,
-                    }) {
-                        if let Some(components) = state.array_components_of(arr_local) {
-                            if components.len() > 1 {
-                                let all_ne = components.iter().enumerate().all(|(i, &a)| {
-                                    components[..i].iter().all(|&b| state.locals_are_ne(a, b))
-                                });
-                                if all_ne {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
 
             findings.push(Finding {
                 rule_id: "hashbrown_map_unchecked",

@@ -181,6 +181,7 @@ pub struct BlockState {
     /// Set on any path that calls `thread::spawn` or `thread::Builder::spawn`.
     /// Used to escalate `env::set_var` when provably concurrent. Join = OR.
     pub thread_spawned: bool,
+
 }
 
 impl BlockState {
