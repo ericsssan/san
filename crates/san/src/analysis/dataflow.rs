@@ -6,7 +6,7 @@ use rustc_middle::ty::TyCtxt;
 
 use crate::analysis::state::BlockState;
 use crate::analysis::summary::SummaryMap;
-use crate::analysis::transfer::{apply_statement, apply_terminator, refine_switchint_edge};
+use crate::analysis::transfer::{apply_statement, apply_terminator, refine_switchint_edge, seed_param_type_facts};
 
 pub struct FlowResults {
     /// Stable fixpoint state at the entry of each basic block.
@@ -65,7 +65,9 @@ pub fn compute_flow<'tcx>(
     body: &Body<'tcx>,
     summaries: &Rc<SummaryMap>,
 ) -> FlowResults {
-    let entry_states = run_fixpoint(tcx, body, BlockState::default(), summaries);
+    let mut initial = BlockState::default();
+    seed_param_type_facts(&mut initial, tcx, body);
+    let entry_states = run_fixpoint(tcx, body, initial, summaries);
     FlowResults { entry_states, summaries: Rc::clone(summaries) }
 }
 

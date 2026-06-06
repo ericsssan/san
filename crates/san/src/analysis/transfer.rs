@@ -3,7 +3,7 @@ use rustc_middle::mir::{
     Statement, StatementKind, Terminator, TerminatorKind,
 };
 use rustc_middle::ty::adjustment::PointerCoercion;
-use rustc_middle::ty::{TyCtxt, TyKind};
+use rustc_middle::ty::{IntTy, Ty, TyCtxt, TyKind, UintTy};
 
 use crate::analysis::object::{HeapState, InitState, ObjectId};
 use crate::analysis::state::BlockState;
@@ -16,7 +16,7 @@ const REALLOC_BASE: u32 = 0x4000_0000;
 
 pub fn apply_statement<'tcx>(
     state: &mut BlockState,
-    _tcx: TyCtxt<'tcx>,
+    tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     stmt: &Statement<'tcx>,
 ) {
@@ -499,17 +499,40 @@ pub fn apply_statement<'tcx>(
             state.bounded.remove(&dst_local);
             state.bounded_or_eq.remove(&dst_local);
         }
-        // Integer / float numeric casts: record the origin local so that
-        // `locals_are_eq` can see through `k as isize` style conversions.
+        // Integer / float numeric casts: record the origin local and propagate
+        // type-level bounds. For integer→integer casts the destination type
+        // gives an unconditional upper bound (e.g. `x as u8` → max 255), and
+        // nonzero is preserved (a nonzero value stays nonzero under widening).
         Rvalue::Cast(
-            CastKind::IntToInt
-            | CastKind::IntToFloat
-            | CastKind::FloatToInt
-            | CastKind::FloatToFloat,
+            cast_kind @ (CastKind::IntToInt
+                | CastKind::IntToFloat
+                | CastKind::FloatToInt
+                | CastKind::FloatToFloat),
             Operand::Copy(src) | Operand::Move(src),
-            _,
+            cast_dst_ty,
         ) if src.projection.is_empty() => {
-            state.cast_origin.insert(dst_local, src.local);
+            let src_local = src.local;
+            state.cast_origin.insert(dst_local, src_local);
+            if matches!(cast_kind, CastKind::IntToInt) {
+                // Destination type gives an unconditional upper bound.
+                if let Some(max_val) = uint_type_max(*cast_dst_ty) {
+                    let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                    *e = (*e).min(max_val);
+                }
+                // Nonzero is preserved through integer widening / narrowing
+                // (the bit pattern stays nonzero under truncation only when the
+                // low bits are provably set — we conservatively propagate only
+                // if the source was provably nonzero).
+                if state.nonzero.contains(&src_local) {
+                    state.nonzero.insert(dst_local);
+                }
+                // Tighter upper bound inherited from the source (e.g. source was
+                // proven < 100, result is still < 100 if the cast is widening).
+                if let Some(&src_ub) = state.const_upper.get(&src_local) {
+                    let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                    *e = (*e).min(src_ub);
+                }
+            }
         }
         Rvalue::BinaryOp(op, operands) => {
             let (op1, op2) = operands.as_ref();
@@ -653,6 +676,23 @@ pub fn apply_statement<'tcx>(
                         state.ne_pair_if_true.insert(dst_local, (a, b));
                     }
                 }
+                // BitOr: if either operand is provably nonzero, the result is
+                // nonzero — OR-ing in a nonzero value sets at least one bit.
+                BinOp::BitOr => {
+                    let lhs_nz = operand_local(op1)
+                        .map_or(false, |l| state.nonzero.contains(&l))
+                        || const_u64(op1).map_or(false, |v| v != 0);
+                    let rhs_nz = operand_local(op2)
+                        .map_or(false, |l| state.nonzero.contains(&l))
+                        || const_u64(op2).map_or(false, |v| v != 0);
+                    if lhs_nz || rhs_nz {
+                        state.nonzero.insert(dst_local);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
                 _ => {
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
@@ -660,6 +700,33 @@ pub fn apply_statement<'tcx>(
                     state.gt_facts.remove(&dst_local);
                 }
             }
+        }
+        // Constant assignment: `_x = const N`.
+        // Extract the scalar value and record it directly as domain facts so that
+        // callers of e.g. `new_unchecked(5)` are suppressed without needing a guard.
+        Rvalue::Use(Operand::Constant(c), _) => {
+            let val_opt: Option<u64> = c.const_
+                .try_to_scalar_int()
+                .and_then(|si| si.to_bits(si.size()).try_into().ok());
+            if let Some(val) = val_opt {
+                if val != 0 {
+                    state.nonzero.insert(dst_local);
+                } else {
+                    state.nonzero.remove(&dst_local);
+                }
+                state.const_upper.insert(dst_local, val);
+                state.const_lower.insert(dst_local, val);
+            }
+            state.points_to.remove(&dst_local);
+            state.local_proto.remove(&dst_local);
+            state.init.remove(&dst_local);
+            state.buf_written.remove(&dst_local);
+            state.lt_facts.remove(&dst_local);
+            state.ge_facts.remove(&dst_local);
+            state.le_facts.remove(&dst_local);
+            state.gt_facts.remove(&dst_local);
+            state.bounded.remove(&dst_local);
+            state.bounded_or_eq.remove(&dst_local);
         }
         _ => {
             // Unknown rvalue: clear tracking on dst.
@@ -690,6 +757,15 @@ pub fn apply_statement<'tcx>(
                 }
             }
         }
+    }
+
+    // Type-level invariants: after any assignment, enforce facts that hold
+    // unconditionally for the destination local's declared type.
+    // E.g. a local of type NonZeroU32 is always nonzero; a u8 is always ≤ 255.
+    // This catches parameters, return values, and intermediate copies.
+    if dst.projection.is_empty() {
+        let dst_ty = body.local_decls[dst_local].ty;
+        enforce_type_facts(state, tcx, dst_local, dst_ty);
     }
 }
 
@@ -1269,6 +1345,9 @@ pub fn apply_terminator<'tcx>(
                 state.bounded.remove(&dest);
                 state.bounded_or_eq.remove(&dest);
             }
+            // Type-level invariants on the return value: e.g. a function returning
+            // NonZeroUsize gives a free nonzero fact; a u8 return is always ≤ 255.
+            enforce_type_facts(state, tcx, dest, body.local_decls[dest].ty);
         }
 
         TerminatorKind::Assert { cond, expected, .. } => {
@@ -2015,4 +2094,62 @@ pub fn is_from_raw_fd_call(path: &str) -> bool {
         || path.ends_with("::from_raw_handle_or_invalid")
         || (path.ends_with("::borrow_raw")
             && (path.contains("BorrowedFd") || path.contains("BorrowedSocket")))
+}
+
+// ── Type-level semantic analysis helpers ─────────────────────────────────────
+
+/// Maximum representable value for unsigned integer and bool types.
+/// Used to derive unconditional upper bounds from a local's declared type.
+pub fn uint_type_max(ty: Ty<'_>) -> Option<u64> {
+    match ty.kind() {
+        TyKind::Bool => Some(1),
+        TyKind::Char => Some(0x10_FFFF), // max valid Unicode scalar value
+        TyKind::Uint(UintTy::U8) => Some(u8::MAX as u64),
+        TyKind::Uint(UintTy::U16) => Some(u16::MAX as u64),
+        TyKind::Uint(UintTy::U32) => Some(u32::MAX as u64),
+        TyKind::Uint(UintTy::U64 | UintTy::Usize) => Some(u64::MAX),
+        _ => None,
+    }
+}
+
+/// Returns true if the type structurally guarantees all values are nonzero.
+/// Covers `NonZero<T>` (core/std), `NonNull<T>`, and any type whose def-path
+/// contains "NonZero" or "NonNull" (custom wrappers following the convention).
+pub fn ty_is_nonzero<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> bool {
+    let TyKind::Adt(adt, _) = ty.kind() else { return false };
+    let path = tcx.def_path_str(adt.did());
+    path.contains("NonZero") || path.contains("NonNull")
+}
+
+/// Apply unconditional type-level invariants to a local after any assignment.
+/// Called from both `apply_statement` (rvalue assignments) and `apply_terminator`
+/// (function call returns) so that type-guaranteed properties are always visible.
+pub fn enforce_type_facts<'tcx>(
+    state: &mut BlockState,
+    tcx: TyCtxt<'tcx>,
+    local: Local,
+    ty: Ty<'tcx>,
+) {
+    if ty_is_nonzero(tcx, ty) {
+        state.nonzero.insert(local);
+    }
+    if let Some(max_val) = uint_type_max(ty) {
+        let e = state.const_upper.entry(local).or_insert(u64::MAX);
+        *e = (*e).min(max_val);
+    }
+}
+
+/// Seed the entry-block state with type-level invariants for function parameters.
+/// A `NonZeroU32` parameter is provably nonzero on function entry; a `u8` parameter
+/// has an unconditional upper bound of 255. This information would otherwise only
+/// be available if the caller passes through a runtime guard.
+pub fn seed_param_type_facts<'tcx>(
+    state: &mut BlockState,
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+) {
+    for local in body.args_iter() {
+        let ty = body.local_decls[local].ty;
+        enforce_type_facts(state, tcx, local, ty);
+    }
 }

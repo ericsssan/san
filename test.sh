@@ -35,6 +35,7 @@ declare -A EXPECTED=(
     [nonnull_new_unchecked]="nonnull_new_unchecked"
     [nonzero_new_unchecked]="nonzero_new_unchecked"
     [nonzero_new_unchecked_safe]=""
+    [semantic_value_safe]=""
     [osstr_encoded_bytes]="osstr_encoded_bytes"
     [pin_new_unchecked]="pin_new_unchecked"
     [ptr_arith]="ptr_arith"
