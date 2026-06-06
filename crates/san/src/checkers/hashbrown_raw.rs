@@ -38,6 +38,7 @@
 ///
 /// Seen in: DashMap, custom concurrent hash maps, and any crate that wraps
 /// `hashbrown::raw::RawTable` for a specialized access pattern.
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -45,12 +46,17 @@ use rustc_middle::ty::TyCtxt;
 pub struct HashbrownRaw;
 
 impl Checker for HashbrownRaw {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -144,6 +150,20 @@ impl Checker for HashbrownRaw {
             } else {
                 continue;
             };
+
+            // insert_no_grow: suppress when the caller has proven spare capacity
+            // via `if table.len() < table.capacity()` — the collection_has_spare
+            // domain (populated on the SwitchInt true edge) covers this.
+            if fn_name == "RawTable::insert_no_grow" {
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(recv) = first_arg_local(args) {
+                        let coll = state.deref_base(recv);
+                        if state.collection_has_spare(coll) {
+                            continue;
+                        }
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "hashbrown_raw",

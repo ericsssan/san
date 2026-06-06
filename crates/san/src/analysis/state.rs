@@ -691,11 +691,22 @@ impl BlockState {
     }
 
     /// Returns `true` if `a` and `b` are proven ≠ on ALL reaching paths — e.g.
-    /// from an explicit `if key1 != key2` guard. Used to suppress
-    /// `Slab::get2_unchecked_mut` when the two keys are provably disjoint.
+    /// from an explicit `if key1 != key2` guard. Looks through `ref_base` one
+    /// hop so that `[&k1, &k2]` array components suppress correctly when the
+    /// `!=` was on the referent locals (`k1`, `k2`) not the ref temporaries.
     pub fn locals_are_ne(&self, a: Local, b: Local) -> bool {
-        let pair = if a.index() <= b.index() { (a, b) } else { (b, a) };
-        self.keys_are_ne.contains(&pair)
+        let canon = |x: Local, y: Local| {
+            if x.index() <= y.index() { (x, y) } else { (y, x) }
+        };
+        if self.keys_are_ne.contains(&canon(a, b)) { return true; }
+        let a0 = self.ref_base.get(&a).copied();
+        let b0 = self.ref_base.get(&b).copied();
+        match (a0, b0) {
+            (Some(sa), _) if self.keys_are_ne.contains(&canon(sa, b)) => true,
+            (_, Some(sb)) if self.keys_are_ne.contains(&canon(a, sb)) => true,
+            (Some(sa), Some(sb)) => self.keys_are_ne.contains(&canon(sa, sb)),
+            _ => false,
+        }
     }
 
     /// Returns the ordered component locals for an array/tuple aggregate, or
