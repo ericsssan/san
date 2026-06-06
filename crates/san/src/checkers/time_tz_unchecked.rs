@@ -35,9 +35,7 @@ impl Checker for TimeTzUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if path != "time::util::refresh_tz_unchecked"
-                && !(path.ends_with("::refresh_tz_unchecked") && path.contains("time"))
-            {
+            if !path.ends_with("::refresh_tz_unchecked") {
                 continue;
             }
 

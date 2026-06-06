@@ -53,28 +53,37 @@ impl Checker for MemmapUnsafe {
 
             let path = tcx.def_path_str(def_id);
 
+            // unchecked_advise* fire on any crate — the _unchecked suffix carries the contract.
+            if path.ends_with("::unchecked_advise_range") {
+                findings.push(Finding {
+                    rule_id: "memmap_unsafe",
+                    severity: Severity::Warning,
+                    span: terminator.source_info.span,
+                    message: "`unchecked_advise_range` — offset + len must not exceed the map \
+                              length (UB otherwise); unchecked madvise flags like MADV_FREE can \
+                              silently zero pages on subsequent read".to_string(),
+                });
+                continue;
+            }
+            if path.ends_with("::unchecked_advise") {
+                findings.push(Finding {
+                    rule_id: "memmap_unsafe",
+                    severity: Severity::Warning,
+                    span: terminator.source_info.span,
+                    message: "`unchecked_advise` — allows madvise flags rejected by the safe \
+                              variant (e.g., MADV_FREE); MADV_FREE silently discards dirty pages \
+                              — subsequent reads may return zeros even for previously-written data"
+                        .to_string(),
+                });
+                continue;
+            }
+
+            // All other arms require the memmap2/Mmap crate context.
             if !path.contains("memmap2") && !path.contains("Mmap") {
                 continue;
             }
 
-            let (fn_name, note) = if path.ends_with("::unchecked_advise_range")
-                && (path.contains("Mmap") || path.contains("memmap2"))
-            {
-                (
-                    "Mmap::unchecked_advise_range",
-                    "offset + len must not exceed the map length (UB otherwise); unchecked \
-                     madvise flags like MADV_FREE can silently zero pages on subsequent read",
-                )
-            } else if path.ends_with("::unchecked_advise")
-                && (path.contains("Mmap") || path.contains("memmap2"))
-            {
-                (
-                    "Mmap::unchecked_advise",
-                    "allows madvise flags rejected by the safe variant (e.g., MADV_FREE); \
-                     MADV_FREE silently discards dirty pages — subsequent reads may return zeros \
-                     even for previously-written data",
-                )
-            } else if path.ends_with("::remap")
+            let (fn_name, note) = if path.ends_with("::remap")
                 && (path.contains("Mmap") || path.contains("memmap2"))
             {
                 (

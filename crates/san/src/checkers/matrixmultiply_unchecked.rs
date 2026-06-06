@@ -48,30 +48,26 @@ impl Checker for MatrixmultiplyUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("matrixmultiply") {
-                continue;
-            }
-
-            let (fn_name, note) = if path.ends_with("::sgemm") || path == "matrixmultiply::sgemm" {
+            let (fn_name, note) = if path.ends_with("::sgemm") {
                 (
                     "sgemm (f32)",
                     "all pointer arguments must point to valid allocations of the declared size; \
                      incorrect dimensions or strides cause OOB reads/writes (UB); \
                      verify layout (row-major vs column-major) before calling",
                 )
-            } else if path.ends_with("::dgemm") || path == "matrixmultiply::dgemm" {
+            } else if path.ends_with("::dgemm") {
                 (
                     "dgemm (f64)",
                     "all pointer arguments must point to valid allocations; \
                      incorrect strides or dimensions produce OOB reads/writes (UB)",
                 )
-            } else if path.ends_with("::cgemm") || path == "matrixmultiply::cgemm" {
+            } else if path.ends_with("::cgemm") {
                 (
                     "cgemm (c32)",
                     "complex single-precision GEMM; each complex element is 2 floats; \
                      pointers must be valid for m*k, k*n, m*n complex elements respectively",
                 )
-            } else if path.ends_with("::zgemm") || path == "matrixmultiply::zgemm" {
+            } else if path.ends_with("::zgemm") {
                 (
                     "zgemm (c64)",
                     "complex double-precision GEMM; pointers must be valid for m*k, k*n, m*n \

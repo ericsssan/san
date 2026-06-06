@@ -32,10 +32,7 @@ impl Checker for HttpUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if path != "http::HeaderValue::from_maybe_shared_unchecked"
-                && !(path.ends_with("::from_maybe_shared_unchecked")
-                    && path.contains("HeaderValue"))
-            {
+            if !path.ends_with("::from_maybe_shared_unchecked") {
                 continue;
             }
 

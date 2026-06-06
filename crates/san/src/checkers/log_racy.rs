@@ -1,4 +1,6 @@
-/// Detects calls to `log::set_logger_racy` and `log::set_max_level_racy`.
+/// Detects calls to any `set_logger_racy` or `set_max_level_racy` function.
+///
+/// The `_racy` suffix is a naming convention meaning "non-atomic global mutation".
 ///
 /// Both functions are unsafe because they perform non-atomic global mutations that
 /// can race with concurrent initializations or logging:
@@ -37,16 +39,16 @@ impl Checker for LogRacy {
 
             let path = tcx.def_path_str(def_id);
 
-            let (fn_name, note) = if path == "log::set_logger_racy" {
+            let (fn_name, note) = if path.ends_with("::set_logger_racy") {
                 (
-                    "log::set_logger_racy",
+                    path.rsplit("::").next().unwrap_or("set_logger_racy"),
                     "installs a global logger without atomic CAS; concurrent calls with any \
                      other logger-installation function are immediate UB; use log::set_logger() \
                      which uses CAS and returns Err if already set",
                 )
-            } else if path == "log::set_max_level_racy" {
+            } else if path.ends_with("::set_max_level_racy") {
                 (
-                    "log::set_max_level_racy",
+                    path.rsplit("::").next().unwrap_or("set_max_level_racy"),
                     "on targets without atomic pointer support the underlying Cell is not \
                      thread-safe — concurrent writes from multiple threads are a data race (UB); \
                      use log::set_max_level() which always uses atomic storage",

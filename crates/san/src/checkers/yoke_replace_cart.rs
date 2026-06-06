@@ -42,7 +42,7 @@ impl Checker for YokeReplaceCart {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("yoke") || !path.ends_with("::replace_cart") {
+            if !path.ends_with("::replace_cart") {
                 continue;
             }
 

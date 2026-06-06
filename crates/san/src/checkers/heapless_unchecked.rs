@@ -34,64 +34,49 @@ impl Checker for HeaplessUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("heapless") {
-                continue;
-            }
 
-            let (fn_name, note) = if path.ends_with("::push_unchecked") {
+            // push_unchecked and pop_unchecked are covered by the general push_unchecked checker.
+            let (fn_name, note) = if path.ends_with("::swap_remove_unchecked") {
                 (
-                    "heapless::Vec::push_unchecked",
-                    "no bounds check — if len == N (compile-time capacity), this writes one \
-                     element past the end of the inline array (OOB write, immediate UB); \
-                     use push() which returns Err on overflow",
-                )
-            } else if path.ends_with("::pop_unchecked") {
-                (
-                    "heapless::Vec::pop_unchecked",
-                    "no empty check — if len == 0, this reads one slot before the start of \
-                     the inline array (OOB read, immediate UB); use pop() → Option<T>",
-                )
-            } else if path.ends_with("::swap_remove_unchecked") {
-                (
-                    "heapless::Vec::swap_remove_unchecked",
+                    "swap_remove_unchecked",
                     "no bounds check on index — if index >= len, this reads/writes past the \
                      end of the inline array (OOB, immediate UB); use swap_remove() which \
                      panics on out-of-bounds",
                 )
             } else if path.ends_with("::push_front_unchecked") {
                 (
-                    "heapless::Deque::push_front_unchecked",
+                    "push_front_unchecked",
                     "no capacity check — if len == N, pushes past the end of the ring buffer \
                      (OOB write, immediate UB); use push_front() → Result",
                 )
             } else if path.ends_with("::push_back_unchecked") {
                 (
-                    "heapless::Deque::push_back_unchecked",
+                    "push_back_unchecked",
                     "no capacity check — if len == N, pushes past the end of the ring buffer \
                      (OOB write, immediate UB); use push_back() → Result",
                 )
             } else if path.ends_with("::pop_front_unchecked") {
                 (
-                    "heapless::Deque::pop_front_unchecked",
+                    "pop_front_unchecked",
                     "no empty check — if the deque is empty this reads uninitialized memory \
                      (immediate UB); use pop_front() → Option<T>",
                 )
             } else if path.ends_with("::pop_back_unchecked") {
                 (
-                    "heapless::Deque::pop_back_unchecked",
+                    "pop_back_unchecked",
                     "no empty check — if the deque is empty this reads uninitialized memory \
                      (immediate UB); use pop_back() → Option<T>",
                 )
-            } else if path.ends_with("::enqueue_unchecked") && path.contains("spsc") {
+            } else if path.ends_with("::enqueue_unchecked") {
                 (
-                    "heapless::spsc::Producer::enqueue_unchecked",
+                    "enqueue_unchecked",
                     "no capacity check — if the SPSC queue is full this writes past the end \
                      of the ring buffer (OOB write, immediate UB); \
                      use enqueue() → Result",
                 )
-            } else if path.ends_with("::dequeue_unchecked") && path.contains("spsc") {
+            } else if path.ends_with("::dequeue_unchecked") {
                 (
-                    "heapless::spsc::Consumer::dequeue_unchecked",
+                    "dequeue_unchecked",
                     "no empty check — if the SPSC queue is empty this reads uninitialized \
                      or recycled memory (immediate UB); use dequeue() → Option<T>",
                 )
@@ -106,8 +91,7 @@ impl Checker for HeaplessUnchecked {
             // The pop/dequeue family requires "non-empty" (len > 0), which no
             // current flow fact proves, so those always fire.
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                let spare_api = path.ends_with("::push_unchecked")
-                    || path.ends_with("::push_front_unchecked")
+                let spare_api = path.ends_with("::push_front_unchecked")
                     || path.ends_with("::push_back_unchecked")
                     || path.ends_with("::enqueue_unchecked");
                 if spare_api {

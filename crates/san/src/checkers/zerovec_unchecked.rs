@@ -32,7 +32,7 @@ impl Checker for ZerovecUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
-            if path.ends_with("::to_char_unchecked") && path.contains("PotentialCodePoint") {
+            if path.ends_with("::to_char_unchecked") {
                 findings.push(Finding {
                     rule_id: "zerovec_unchecked",
                     severity: Severity::Warning,

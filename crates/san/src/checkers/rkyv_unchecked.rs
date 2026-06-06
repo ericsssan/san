@@ -36,32 +36,32 @@ impl Checker for RkyvUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("rkyv") {
-                continue;
-            }
 
+            // access_unchecked* — generalised: any zero-copy deserializer using this naming
+            // pattern has the same byte-validity contract regardless of crate.
             let (fn_name, note) = if path.ends_with("::access_unchecked_mut") {
                 (
-                    "rkyv::access_unchecked_mut",
+                    path.rsplit("::").next().unwrap_or("access_unchecked_mut"),
                     "bytes must be properly aligned for the archived type and contain valid \
                      initialized data; no concurrent reference to the byte range may exist; \
-                     validate with `rkyv::access_mut` (returns Result) before accessing \
+                     validate with the checked variant (returns Result) before accessing \
                      untrusted archived data",
                 )
             } else if path.ends_with("::access_unchecked") {
                 (
-                    "rkyv::access_unchecked",
+                    path.rsplit("::").next().unwrap_or("access_unchecked"),
                     "bytes must be properly aligned for the archived type and contain valid \
                      initialized data; misaligned or invalid bytes are immediate UB; validate \
-                     with `rkyv::access` (returns Result) before accessing untrusted archived data",
+                     with the checked variant (returns Result) before accessing untrusted data",
                 )
-            } else if path.ends_with("::archived_root_mut") {
+            // archived_root* — rkyv-specific naming, keep crate guard
+            } else if path.ends_with("::archived_root_mut") && path.contains("rkyv") {
                 (
                     "rkyv::archived_root_mut",
                     "bytes must be a valid archived T with proper alignment; \
                      mutating through an invalid archived reference is immediate UB",
                 )
-            } else if path.ends_with("::archived_root") {
+            } else if path.ends_with("::archived_root") && path.contains("rkyv") {
                 (
                     "rkyv::archived_root",
                     "bytes must be a valid archived T starting at the position returned by \

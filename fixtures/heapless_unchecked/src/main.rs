@@ -1,14 +1,15 @@
-use heapless::Vec;
+use heapless::{Deque, Vec};
 
 fn main() {
-    // Bug: push_unchecked — appends past capacity without a bounds check.
-    // If len == N the write is one slot past the end of the inline array (OOB write, UB).
+    // Bug: swap_remove_unchecked — no bounds check on index.
+    // If index >= len, reads/writes past the end of the inline array (OOB, UB).
     let mut v: Vec<u32, 4> = Vec::new();
-    unsafe { v.push_unchecked(1u32) };
-    unsafe { v.push_unchecked(2u32) };
-    println!("{:?}", v.as_slice());
+    v.push(1u32).ok();
+    v.push(2u32).ok();
+    unsafe { v.swap_remove_unchecked(5) };
 
-    // Bug: set_len — elements in old_len..new_len are uninitialized; new_len must be <= N.
-    let mut v2: Vec<u32, 4> = Vec::new();
-    unsafe { v2.set_len(2) };
+    // Bug: push_back_unchecked — no capacity check.
+    // If the deque is full, pushes past the end of the ring buffer (OOB write, UB).
+    let mut d: Deque<u32, 4> = Deque::new();
+    unsafe { d.push_back_unchecked(1u32) };
 }

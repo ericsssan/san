@@ -60,10 +60,6 @@ impl Checker for BytemuckUnsafeImpl {
             let Some(trait_def_id) = trait_impl.trait_ref.trait_def_id() else { continue };
             let trait_path = tcx.def_path_str(trait_def_id);
 
-            if !trait_path.contains("bytemuck") {
-                continue;
-            }
-
             let (trait_name, note) = if trait_path.ends_with("::Pod") {
                 (
                     "Pod",

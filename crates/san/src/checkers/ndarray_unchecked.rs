@@ -56,12 +56,27 @@ impl Checker for NdarrayUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
+            let span = terminator.source_info.span;
 
-            if !path.contains("ndarray") {
+            // from_shape_vec_unchecked — _unchecked suffix carries the contract; no crate filter.
+            if path.ends_with("::from_shape_vec_unchecked") {
+                findings.push(Finding {
+                    rule_id: "ndarray_unchecked",
+                    severity: Severity::Warning,
+                    span,
+                    message: "`from_shape_vec_unchecked` — shape.size() must equal v.len(); if \
+                              the shape product does not match the vector length, subsequent \
+                              indexing reads outside the vec's allocation (out-of-bounds UB); \
+                              use from_shape_vec which returns Result"
+                        .to_string(),
+                });
                 continue;
             }
 
-            let span = terminator.source_info.span;
+            // uget/uget_mut/uswap/from_shape_ptr require ndarray module context.
+            if !path.contains("ndarray") {
+                continue;
+            }
 
             // ── uget / uget_mut: suppress if every index component is bounded ──
             if path.ends_with("::uget") || path.ends_with("::uget_mut") {
@@ -140,15 +155,8 @@ impl Checker for NdarrayUnchecked {
                 continue;
             }
 
-            // ── from_shape_vec_unchecked / from_shape_ptr: pattern-match only ──
-            let (fn_name, note) = if path.ends_with("::from_shape_vec_unchecked") {
-                (
-                    "ArrayBase::from_shape_vec_unchecked",
-                    "shape.size() must equal v.len(); if the shape product does not match \
-                     the vector length, subsequent indexing reads outside the vec's allocation \
-                     (out-of-bounds UB); use ArrayBase::from_shape_vec which returns Result",
-                )
-            } else if path.ends_with("::from_shape_ptr") && path.contains("ndarray") {
+            // ── from_shape_ptr: pattern-match only ──
+            let (fn_name, note) = if path.ends_with("::from_shape_ptr") && path.contains("ndarray") {
                 (
                     "ArrayView::from_shape_ptr",
                     "ptr must point to a contiguous allocation of at least shape.size() elements \

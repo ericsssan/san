@@ -42,11 +42,19 @@ impl Checker for NixFork {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("nix") {
-                continue;
-            }
 
-            let (fn_name, note) = if path.ends_with("unistd::fork") {
+            // from_sigset_t_unchecked: _unchecked suffix carries the contract; no crate filter.
+            // fork/signal/sigaction: names are too generic without the nix module path.
+            let (fn_name, note) = if path.ends_with("::from_sigset_t_unchecked") {
+                (
+                    "from_sigset_t_unchecked",
+                    "constructs a SigSet from a raw libc::sigset_t without validation; an \
+                     uninitialized or corrupted sigset causes subsequent signal mask operations \
+                     (sigprocmask, pthread_sigmask) to manipulate wrong or undefined signal masks",
+                )
+            } else if !path.contains("nix") {
+                continue;
+            } else if path.ends_with("unistd::fork") {
                 (
                     "nix::unistd::fork",
                     "child process may only call async-signal-safe functions before exec(); \
@@ -69,13 +77,6 @@ impl Checker for NixFork {
                      calling async-signal-unsafe functions inside the handler is UB; also unsafe \
                      because the previous SigAction returned may be invalid if not originally set \
                      by sigaction",
-                )
-            } else if path.ends_with("::from_sigset_t_unchecked") {
-                (
-                    "SigSet::from_sigset_t_unchecked",
-                    "constructs a SigSet from a raw libc::sigset_t without validation; an \
-                     uninitialized or corrupted sigset causes subsequent signal mask operations \
-                     (sigprocmask, pthread_sigmask) to manipulate wrong or undefined signal masks",
                 )
             } else {
                 continue;
