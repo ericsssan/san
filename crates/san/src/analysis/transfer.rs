@@ -693,6 +693,53 @@ pub fn apply_statement<'tcx>(
                     state.le_facts.remove(&dst_local);
                     state.gt_facts.remove(&dst_local);
                 }
+                // BitAnd: result ≤ min(lhs, rhs) for unsigned values.
+                // A constant operand gives a direct upper bound — `x & 0x7F` ≤ 127.
+                BinOp::BitAnd => {
+                    let const_ub = const_u64(op2).or_else(|| const_u64(op1));
+                    let src_ub_a = operand_local(op1).and_then(|l| state.const_upper.get(&l).copied());
+                    let src_ub_b = operand_local(op2).and_then(|l| state.const_upper.get(&l).copied());
+                    let best_ub = [const_ub, src_ub_a, src_ub_b]
+                        .into_iter()
+                        .flatten()
+                        .min();
+                    if let Some(ub) = best_ub {
+                        let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                        *e = (*e).min(ub);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                // Rem: `a % b` is in [0, b-1] when b is a nonzero constant.
+                BinOp::Rem => {
+                    if let Some(divisor) = const_u64(op2).filter(|&d| d > 0) {
+                        let ub = divisor.saturating_sub(1);
+                        let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                        *e = (*e).min(ub);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                // Shr: right-shifting a value with a known upper bound reduces it.
+                // `a >> n` ≤ `const_upper[a] >> n`.
+                BinOp::Shr => {
+                    if let Some(shift) = const_u64(op2) {
+                        let src_ub = operand_local(op1)
+                            .and_then(|l| state.const_upper.get(&l).copied())
+                            .unwrap_or(u64::MAX);
+                        let shifted_ub = src_ub.checked_shr(shift as u32).unwrap_or(0);
+                        let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                        *e = (*e).min(shifted_ub);
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
                 _ => {
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);

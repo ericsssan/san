@@ -647,6 +647,13 @@ impl BlockState {
         below_surrogates || above_surrogates
     }
 
+    /// Returns `true` if `local` is proven to be valid ASCII on all reaching paths
+    /// (value ≤ 127). Suppresses `as_ascii_unchecked` calls where the argument
+    /// was produced by e.g. `x & 0x7F`, a literal ≤ 127, or a u7-range value.
+    pub fn local_is_ascii(&self, local: Local) -> bool {
+        self.const_upper.get(&local).map_or(false, |&ub| ub <= 127)
+    }
+
     /// Proven constant upper bound for `local` (i.e. `local ≤ bound`), or `None`.
     pub fn local_upper_bound(&self, local: Local) -> Option<u64> {
         self.const_upper.get(&local).copied()

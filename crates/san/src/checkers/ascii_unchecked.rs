@@ -28,6 +28,7 @@
 /// `str::as_ascii`, all of which return `Option` and never cause UB.
 ///
 /// Nightly: `#![feature(ascii_char)]`
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -35,12 +36,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct AsciiUnchecked;
 
 impl Checker for AsciiUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -95,6 +96,16 @@ impl Checker for AsciiUnchecked {
             } else {
                 continue;
             };
+
+            // Suppress when the argument is provably ASCII (≤ 127) on all reaching
+            // paths — e.g. from `x & 0x7F`, a literal ≤ 127, or a u7-range value.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg) = first_arg_local(args) {
+                    if state.local_is_ascii(arg) {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "ascii_unchecked",
