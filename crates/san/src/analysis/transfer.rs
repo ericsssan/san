@@ -3,7 +3,7 @@ use rustc_middle::mir::{
     Statement, StatementKind, Terminator, TerminatorKind,
 };
 use rustc_middle::ty::adjustment::PointerCoercion;
-use rustc_middle::ty::{IntTy, Ty, TyCtxt, TyKind, UintTy};
+use rustc_middle::ty::{Ty, TyCtxt, TyKind, UintTy};
 
 use crate::analysis::object::{HeapState, InitState, ObjectId};
 use crate::analysis::state::BlockState;
@@ -90,6 +90,12 @@ pub fn apply_statement<'tcx>(
     state.keys_are_ne.retain(|&(a, b)| a != dst_local && b != dst_local);
     state.eq_locals.retain(|&(a, b)| a != dst_local && b != dst_local);
     state.cast_origin.remove(&dst_local);
+    // Collection-specific bounds: clear conditional facts keyed on dst_local,
+    // and remove any (idx, coll) pairs involving dst_local.
+    state.lt_for.remove(&dst_local);
+    state.le_for.remove(&dst_local);
+    state.index_bounded_for.retain(|&(i, c)| i != dst_local && c != dst_local);
+    state.index_bounded_or_eq_for.retain(|&(i, c)| i != dst_local && c != dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -561,8 +567,23 @@ pub fn apply_statement<'tcx>(
                 BinOp::Lt => {
                     if let Some(lhs) = operand_local(op1) {
                         state.lt_facts.insert(dst_local, lhs);
+                        // Collection-specific: record (idx, coll) when rhs is a len() result.
+                        if let Some(rhs) = operand_local(op2) {
+                            let coll = state.len_of.get(&rhs).or_else(|| {
+                                // len_of is also keyed on the ref_base chain
+                                state.ref_base.get(&rhs).and_then(|b| state.len_of.get(b))
+                            }).copied();
+                            if let Some(coll) = coll {
+                                state.lt_for.insert(dst_local, (lhs, coll));
+                            } else {
+                                state.lt_for.remove(&dst_local);
+                            }
+                        } else {
+                            state.lt_for.remove(&dst_local);
+                        }
                     } else {
                         state.lt_facts.remove(&dst_local);
+                        state.lt_for.remove(&dst_local);
                     }
                     state.ge_facts.remove(&dst_local);
                     state.le_facts.remove(&dst_local);
@@ -601,8 +622,22 @@ pub fn apply_statement<'tcx>(
                 BinOp::Le => {
                     if let Some(lhs) = operand_local(op1) {
                         state.le_facts.insert(dst_local, lhs);
+                        // Collection-specific: record (idx, coll) when rhs is a len() result.
+                        if let Some(rhs) = operand_local(op2) {
+                            let coll = state.len_of.get(&rhs).or_else(|| {
+                                state.ref_base.get(&rhs).and_then(|b| state.len_of.get(b))
+                            }).copied();
+                            if let Some(coll) = coll {
+                                state.le_for.insert(dst_local, (lhs, coll));
+                            } else {
+                                state.le_for.remove(&dst_local);
+                            }
+                        } else {
+                            state.le_for.remove(&dst_local);
+                        }
                     } else {
                         state.le_facts.remove(&dst_local);
+                        state.le_for.remove(&dst_local);
                     }
                     state.lt_facts.remove(&dst_local);
                     state.ge_facts.remove(&dst_local);
@@ -1001,6 +1036,10 @@ pub fn apply_terminator<'tcx>(
             state.keys_are_ne.retain(|&(a, b)| a != dest && b != dest);
             state.eq_locals.retain(|&(a, b)| a != dest && b != dest);
             state.cast_origin.remove(&dest);
+            state.lt_for.remove(&dest);
+            state.le_for.remove(&dest);
+            state.index_bounded_for.retain(|&(i, c)| i != dest && c != dest);
+            state.index_bounded_or_eq_for.retain(|&(i, c)| i != dest && c != dest);
             // Record `len()`/`capacity()` results so a following comparison can be
             // attributed to the receiver collection.
             if path.ends_with("::len") || path.ends_with("::capacity") {
@@ -1694,6 +1733,13 @@ pub fn refine_switchint_edge<'tcx>(
         }
         if let Some(&lhs) = state.le_facts.get(&discr_local) {
             state.bounded_or_eq.insert(lhs);
+        }
+        // Collection-specific bounds: drain lt_for/le_for into index_bounded_for sets.
+        if let Some(&(idx, coll)) = state.lt_for.get(&discr_local) {
+            state.index_bounded_for.insert((idx, coll));
+        }
+        if let Some(&(idx, coll)) = state.le_for.get(&discr_local) {
+            state.index_bounded_or_eq_for.insert((idx, coll));
         }
         if let Some(&coll) = state.spare_if_true.get(&discr_local) {
             state.has_spare.insert(coll);

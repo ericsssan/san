@@ -55,16 +55,25 @@ impl Checker for SplitAtUnchecked {
             };
 
             // Suppress when mid is proven <= self.len() on all predecessor paths.
-            // split_at_unchecked(self, mid) — mid is args[1].
+            // split_at_unchecked(self, mid) — recv=args[0], mid=args[1].
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                if let Some(mid_local) = args.get(1).and_then(|a| {
-                    use rustc_middle::mir::Operand;
-                    match &a.node {
-                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
-                        _ => None,
+                use rustc_middle::mir::Operand;
+                let recv_local = args.first().and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) => Some(state.deref_base(p.local)),
+                    _ => None,
+                });
+                let mid_local = args.get(1).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                    _ => None,
+                });
+                if let (Some(recv), Some(mid)) = (recv_local, mid_local) {
+                    // Precise: mid proven <= THIS slice's len.
+                    if state.index_is_bounded_or_eq_for(mid, recv) || state.index_is_bounded_for(mid, recv) {
+                        continue;
                     }
-                }) {
-                    if state.local_is_bounded_or_eq(mid_local) {
+                }
+                if let Some(mid) = mid_local {
+                    if state.local_is_bounded_or_eq(mid) {
                         continue;
                     }
                 }

@@ -176,6 +176,9 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::time_tz_unchecked::TimeTzUnchecked,
     &checkers::rustix_unsafe::RustixUnsafe,
     &checkers::typed_arena_unchecked::TypedArenaUnchecked,
+    // Interprocedural precondition propagation: fires at call sites where a
+    // callee has implicit unsafe preconditions not met by the caller.
+    &checkers::precond_propagation::PrecondPropagation,
     // Flow-sensitive checkers (use flow results for precise detection).
     &checkers::flow::ownership::OwnershipProtocol,
     &checkers::flow::epoch_guard::EpochGuard,
@@ -398,9 +401,26 @@ pub fn run_checks(tcx: TyCtxt<'_>) -> Vec<Finding> {
     // Wrap the converged summaries in an `Rc` so each `FlowResults` can carry
     // them cheaply to checkers that need interprocedural effects.
     let summaries = std::rc::Rc::new(summaries);
+
+    // Precondition summary pre-pass: identify which function parameters carry
+    // implicit unsafe preconditions (because the body calls unsafe operations
+    // on them without guards). These summaries let the PrecondPropagation checker
+    // fire at call sites in callers, catching "safe API wraps unsafe unsoundly".
+    let mut precond_map = analysis::PrecondSummaryMap::new();
     for &def_id in &local_fns {
         let body = tcx.optimized_mir(def_id);
         let flow = analysis::compute_flow(tcx, body, &summaries);
+        let ps = analysis::extract_precond_summary(tcx, body, &flow);
+        if !ps.is_empty() {
+            precond_map.insert(def_id, ps);
+        }
+    }
+    let precond_summaries = std::rc::Rc::new(precond_map);
+
+    for &def_id in &local_fns {
+        let body = tcx.optimized_mir(def_id);
+        let mut flow = analysis::compute_flow(tcx, body, &summaries);
+        flow.precond_summaries = Some(std::rc::Rc::clone(&precond_summaries));
         for checker in CHECKERS {
             findings.extend(checker.check(tcx, body, &flow));
         }

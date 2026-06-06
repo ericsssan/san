@@ -42,16 +42,28 @@ impl Checker for SliceGetUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
-            // Suppress non-Pin get_unchecked* when the index is proven bounded on all paths.
+            // Suppress non-Pin get_unchecked* when the index is proven bounded.
             if (path.ends_with("get_unchecked_mut") || path.ends_with("get_unchecked"))
                 && !path.contains("pin::Pin")
             {
                 if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                    if let Some(idx_local) = args.get(1).and_then(|a| match &a.node {
+                    let recv_local = args.first().and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) => Some(state.deref_base(p.local)),
+                        _ => None,
+                    });
+                    let idx_local = args.get(1).and_then(|a| match &a.node {
                         Operand::Move(p) | Operand::Copy(p) => Some(p.local),
                         _ => None,
-                    }) {
-                        if state.local_is_bounded(idx_local) {
+                    });
+                    if let (Some(recv), Some(idx)) = (recv_local, idx_local) {
+                        // Precise check: index proven < THIS slice's len on all paths.
+                        if state.index_is_bounded_for(idx, recv) {
+                            continue;
+                        }
+                    }
+                    // Fallback: index was compared against some bound (may differ from this slice).
+                    if let Some(idx) = idx_local {
+                        if state.local_is_bounded(idx) {
                             continue;
                         }
                     }

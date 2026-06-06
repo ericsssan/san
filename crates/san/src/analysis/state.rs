@@ -169,6 +169,26 @@ pub struct BlockState {
     /// can each be checked against `bounded`. Join = UNION.
     pub array_components: HashMap<Local, Vec<Local>>,
 
+    // ── collection-specific index bounds domain ────────────────────────────
+    // These connect an index to the specific collection it was compared against,
+    // enabling more precise suppression than the generic `bounded` domain which
+    // only records that *some* comparison was performed.
+    /// cmp_local → (idx_local, coll_local): this bool is `true` iff `idx < coll.len()`.
+    /// The collection-specific analog of `lt_facts`. Join = UNION.
+    pub lt_for: HashMap<Local, (Local, Local)>,
+    /// cmp_local → (idx_local, coll_local): this bool is `true` iff `idx <= coll.len()`.
+    /// Join = UNION.
+    pub le_for: HashMap<Local, (Local, Local)>,
+    /// (idx, coll) pairs where idx is proven `< coll.len()` on ALL reaching paths.
+    /// Tighter than `bounded`: also identifies which collection the bound applies to,
+    /// enabling detection of `if i < a.len() { b.get_unchecked(i) }` mismatches.
+    /// Join = INTERSECTION.
+    pub index_bounded_for: HashSet<(Local, Local)>,
+    /// (idx, coll) pairs where idx is proven `<= coll.len()` on ALL reaching paths.
+    /// Used for `split_at_unchecked` which requires `mid <= len`.
+    /// Join = INTERSECTION.
+    pub index_bounded_or_eq_for: HashSet<(Local, Local)>,
+
     // ── fd-lifecycle / I/O-safety domain ───────────────────────────────────
     /// Locals whose integer value was produced by `into_raw_fd/socket/handle`.
     /// Suppresses `from_raw_fd` for the canonical transfer pattern (safe).
@@ -509,6 +529,30 @@ impl BlockState {
             changed = true;
         }
 
+        // lt_for / le_for: UNION — conditional facts.
+        for (local, pair) in &other.lt_for {
+            result.lt_for.entry(*local).or_insert_with(|| { changed = true; *pair });
+        }
+        for (local, pair) in &other.le_for {
+            result.le_for.entry(*local).or_insert_with(|| { changed = true; *pair });
+        }
+
+        // index_bounded_for / index_bounded_or_eq_for: INTERSECTION.
+        // Only keep (idx, coll) pairs that are proven on ALL incoming paths.
+        let new: HashSet<(Local, Local)> = result.index_bounded_for
+            .iter().copied()
+            .filter(|p| other.index_bounded_for.contains(p))
+            .collect();
+        if new != result.index_bounded_for { changed = true; result.index_bounded_for = new; }
+        let new: HashSet<(Local, Local)> = result.index_bounded_or_eq_for
+            .iter().copied()
+            .filter(|p| other.index_bounded_or_eq_for.contains(p))
+            .collect();
+        if new != result.index_bounded_or_eq_for {
+            changed = true;
+            result.index_bounded_or_eq_for = new;
+        }
+
         (result, changed)
     }
 
@@ -652,6 +696,21 @@ impl BlockState {
     /// was produced by e.g. `x & 0x7F`, a literal ≤ 127, or a u7-range value.
     pub fn local_is_ascii(&self, local: Local) -> bool {
         self.const_upper.get(&local).map_or(false, |&ub| ub <= 127)
+    }
+
+    /// Returns `true` if `idx` is proven `< coll.len()` (or `<= coll.len()` for
+    /// `index_bounded_or_eq`) on all reaching paths. More precise than `bounded`:
+    /// connects the index to the specific collection it was compared against.
+    /// This catches `if i < a.len() { b.get_unchecked(i) }` as unsafe even
+    /// though `bounded[i]` would suppress it.
+    pub fn index_is_bounded_for(&self, idx: Local, coll: Local) -> bool {
+        self.index_bounded_for.contains(&(idx, coll))
+    }
+
+    /// Returns `true` if `idx` is proven `<= coll.len()` on all reaching paths.
+    /// Used for `split_at_unchecked` which requires `mid <= len`.
+    pub fn index_is_bounded_or_eq_for(&self, idx: Local, coll: Local) -> bool {
+        self.index_bounded_or_eq_for.contains(&(idx, coll))
     }
 
     /// Proven constant upper bound for `local` (i.e. `local ≤ bound`), or `None`.

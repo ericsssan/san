@@ -53,6 +53,7 @@ declare -A EXPECTED=(
     [slice_align_to]="slice_align_to"
     [slice_from_raw_parts]="slice_from_raw_parts"
     [slice_get_unchecked]="slice_get_unchecked"
+    [slice_get_unchecked_safe]=""
     [static_mut]="static_mut"
     [str_from_utf8_unchecked]="str_from_utf8_unchecked"
     [str_from_raw_parts_uaf]="use_after_free"
@@ -184,6 +185,7 @@ declare -A EXPECTED=(
     [maybeuninit_double_free]="ownership_double_free"
     [cstring_double_free]="ownership_double_free"
     [summary_double_free]="ownership_double_free"
+    [precond_propagation]="precond_violation"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""

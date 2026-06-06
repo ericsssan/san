@@ -23,18 +23,18 @@
 ///
 /// Nightly: `#![feature(step_trait)]`.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct StepUnchecked;
 
 impl Checker for StepUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -56,6 +56,20 @@ impl Checker for StepUnchecked {
             } else {
                 continue;
             };
+
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let count_local = args.get(1).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                    _ => None,
+                });
+                if let Some(cnt) = count_local {
+                    // forward/backward by 0 steps is always safe — start unchanged, no overflow
+                    if state.const_upper.get(&cnt).copied() == Some(0)
+                        && state.const_lower.get(&cnt).copied().unwrap_or(0) == 0 {
+                        continue;
+                    }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "step_unchecked",

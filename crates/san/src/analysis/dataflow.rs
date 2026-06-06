@@ -4,6 +4,7 @@ use std::rc::Rc;
 use rustc_middle::mir::{BasicBlock, BasicBlockData, Body, TerminatorKind, UnwindAction};
 use rustc_middle::ty::TyCtxt;
 
+use crate::analysis::precond::PrecondSummaryMap;
 use crate::analysis::state::BlockState;
 use crate::analysis::summary::SummaryMap;
 use crate::analysis::transfer::{apply_statement, apply_terminator, refine_switchint_edge, seed_param_type_facts};
@@ -16,6 +17,11 @@ pub struct FlowResults {
     /// can tell which calls free which parameter (e.g. a `deallocate(p)` whose
     /// summary reconstitutes param 0). Empty during summary extraction itself.
     pub summaries: Rc<SummaryMap>,
+    /// Precondition summaries: which callee arguments must satisfy which
+    /// properties (nonzero, ascii, bounded) for the callee to not UB.
+    /// Populated by a pre-pass in the main analysis driver; `None` during the
+    /// summary extraction pass (when precond summaries are not yet available).
+    pub precond_summaries: Option<Rc<PrecondSummaryMap>>,
 }
 
 impl FlowResults {
@@ -68,7 +74,7 @@ pub fn compute_flow<'tcx>(
     let mut initial = BlockState::default();
     seed_param_type_facts(&mut initial, tcx, body);
     let entry_states = run_fixpoint(tcx, body, initial, summaries);
-    FlowResults { entry_states, summaries: Rc::clone(summaries) }
+    FlowResults { entry_states, summaries: Rc::clone(summaries), precond_summaries: None }
 }
 
 /// Like `compute_flow` but seeds the entry block with the raw-pointer
@@ -81,7 +87,7 @@ pub fn compute_flow_for_summary<'tcx>(
 ) -> FlowResults {
     use crate::analysis::summary::summary_initial_state;
     let entry_states = run_fixpoint(tcx, body, summary_initial_state(body), summaries);
-    FlowResults { entry_states, summaries: Rc::new(SummaryMap::new()) }
+    FlowResults { entry_states, summaries: Rc::new(SummaryMap::new()), precond_summaries: None }
 }
 
 /// Internal worklist fixpoint engine, returning the per-block entry states.

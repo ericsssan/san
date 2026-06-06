@@ -27,19 +27,20 @@
 /// Common bugs: off-by-one that causes unsigned underflow (`unchecked_sub`),
 /// multiplicative size computations that overflow on large inputs, forgetting
 /// that `i8::MIN.unchecked_neg()` == UB not just "big".
+use crate::analysis::transfer::uint_type_max;
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
-use rustc_middle::ty::TyCtxt;
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
+use rustc_middle::ty::{IntTy, TyCtxt, TyKind, UintTy};
 
 pub struct UncheckedIntArith;
 
 impl Checker for UncheckedIntArith {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, destination, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -141,6 +142,66 @@ impl Checker for UncheckedIntArith {
             } else {
                 continue;
             };
+
+            // Flow suppression: suppress when const analysis can prove safety.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                let arg_local = |idx: usize| -> Option<rustc_middle::mir::Local> {
+                    args.get(idx).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                        _ => None,
+                    })
+                };
+                let a = arg_local(0);
+                let b = arg_local(1);
+
+                let suppressed = if path.ends_with("::unchecked_add") || path.ends_with("::unchecked_mul") {
+                    // suppress when both operands have const_upper and their sum/product can't overflow
+                    if let (Some(al), Some(bl)) = (a, b) {
+                        let a_ub = state.const_upper.get(&al).copied();
+                        let b_ub = state.const_upper.get(&bl).copied();
+                        if let (Some(au), Some(bu)) = (a_ub, b_ub) {
+                            let dest_ty = body.local_decls[destination.local].ty;
+                            if let Some(type_max) = uint_type_max(dest_ty) {
+                                if path.ends_with("::unchecked_add") {
+                                    // au + bu <= type_max means no overflow
+                                    au.checked_add(bu).map_or(false, |s| s <= type_max)
+                                } else {
+                                    // au * bu <= type_max means no overflow (use u128 to avoid overflow in the check)
+                                    (au as u128).checked_mul(bu as u128).map_or(false, |p| p <= type_max as u128)
+                                }
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else if path.ends_with("::unchecked_sub") {
+                    // suppress for unsigned when const_lower[a] >= const_upper[b]
+                    if let (Some(al), Some(bl)) = (a, b) {
+                        let a_lb = state.const_lower.get(&al).copied().unwrap_or(0);
+                        let b_ub = state.const_upper.get(&bl).copied().unwrap_or(u64::MAX);
+                        a_lb >= b_ub
+                    } else { false }
+                } else if path.ends_with("::unchecked_shl") || path.ends_with("::unchecked_shr")
+                    || path.ends_with("::unchecked_shl_exact") || path.ends_with("::unchecked_shr_exact")
+                {
+                    // suppress when shift amount < bit width of type
+                    if let Some(shift_local) = b {
+                        let shift_ub = state.const_upper.get(&shift_local).copied().unwrap_or(u64::MAX);
+                        // get bit width from the value being shifted (arg 0's type)
+                        if let Some(val_local) = a {
+                            let val_ty = body.local_decls[val_local].ty;
+                            let bit_width: u64 = match val_ty.kind() {
+                                TyKind::Uint(UintTy::U8) | TyKind::Int(IntTy::I8) => 8,
+                                TyKind::Uint(UintTy::U16) | TyKind::Int(IntTy::I16) => 16,
+                                TyKind::Uint(UintTy::U32) | TyKind::Int(IntTy::I32) => 32,
+                                TyKind::Uint(UintTy::U64) | TyKind::Int(IntTy::I64) => 64,
+                                _ => u64::MAX,
+                            };
+                            shift_ub < bit_width
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if suppressed { continue; }
+            }
 
             findings.push(Finding {
                 rule_id: "unchecked_int_arith",

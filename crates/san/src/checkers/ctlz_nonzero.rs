@@ -24,6 +24,7 @@
 /// Common bugs: computing `ctlz_nonzero(bitmask)` where the bitmask can
 /// be zero when no bits are set (e.g., in event-loop or bitset iteration
 /// code), or computing `cttz_nonzero(round_up(x))` without verifying `x > 0`.
+use crate::analysis::transfer::first_arg_local;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -31,12 +32,12 @@ use rustc_middle::ty::TyCtxt;
 pub struct CtlzNonzero;
 
 impl Checker for CtlzNonzero {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, flow: &crate::analysis::FlowResults) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -59,6 +60,12 @@ impl Checker for CtlzNonzero {
             } else {
                 continue;
             };
+
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arg) = first_arg_local(args) {
+                    if state.local_is_nonzero(arg) { continue; }
+                }
+            }
 
             findings.push(Finding {
                 rule_id: "ctlz_nonzero",
