@@ -20,6 +20,17 @@ fn guarded_eq_early_return(n: u32) -> Option<NonZeroU32> {
     Some(unsafe { NonZeroU32::new_unchecked(n) })
 }
 
+/// as_mut_ptr() is always non-null — NonNull::new_unchecked on its result is safe.
+fn vec_as_mut_ptr_nonnull() -> std::ptr::NonNull<u32> {
+    let mut v: Vec<u32> = Vec::with_capacity(4);
+    let p = v.as_mut_ptr();
+    // p is guaranteed non-null (Vec uses a dangling ptr for zero-capacity,
+    // never null), so NonNull::new_unchecked is safe here.
+    unsafe { std::ptr::NonNull::new_unchecked(p) }
+}
+
 fn main() {
-    println!("{:?} {:?} {:?}", guarded_ne(1), guarded_gt(2), guarded_eq_early_return(3));
+    println!("{:?} {:?} {:?} {:?}",
+        guarded_ne(1), guarded_gt(2), guarded_eq_early_return(3),
+        vec_as_mut_ptr_nonnull());
 }

@@ -1457,6 +1457,17 @@ pub fn apply_terminator<'tcx>(
             // Type-level invariants on the return value: e.g. a function returning
             // NonZeroUsize gives a free nonzero fact; a u8 return is always ≤ 255.
             enforce_type_facts(state, tcx, dest, body.local_decls[dest].ty);
+            // as_ptr()/as_mut_ptr()/as_non_null_ptr() always return a non-null pointer
+            // (containers use a dangling pointer for zero-capacity, but never null).
+            // This lets NonNull::new_unchecked(vec.as_mut_ptr()) be suppressed.
+            if path.ends_with("::as_ptr")
+                || path.ends_with("::as_mut_ptr")
+                || path.ends_with("::as_non_null_ptr")
+                || path.ends_with("::as_non_null_slice")
+                || path.ends_with("::as_non_null")
+            {
+                state.nonzero.insert(dest);
+            }
         }
 
         TerminatorKind::Assert { cond, expected, .. } => {

@@ -58,6 +58,11 @@ impl Checker for NonNullNewUnchecked {
                     if state.ptr_is_raw_owned(ptr_local) {
                         continue;
                     }
+                    // Suppress when the pointer is proven nonzero (e.g. from as_ptr()
+                    // / as_mut_ptr() which never return null).
+                    if state.local_is_nonzero(ptr_local) {
+                        continue;
+                    }
                 }
             }
 
