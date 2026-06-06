@@ -189,6 +189,7 @@ declare -A EXPECTED=(
     [cast_away_const]="cast_away_const"
     [transmute_lifetime]="transmute_lifetime"
     [layout_unchecked_safe]=""
+    [field_owned_double_free]="ownership_double_free"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""

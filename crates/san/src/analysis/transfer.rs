@@ -30,7 +30,7 @@ pub fn apply_statement<'tcx>(
     // flagged, while the buggy fall-through path (no such store) stays flagged.
     state.invalidate_owner(dst.local);
 
-    // Store into projection (field/deref) → escape any tracked source local.
+    // Store into projection (field/deref) → handle tracked source locals carefully.
     // Exception: field writes to the return place (`_0.field = ...`, no Deref) are
     // common in optimized MIR for Clone-style bodies. Propagate the source's
     // points_to into _0 so summary extraction sees SUMMARY_BASE objects there.
@@ -48,7 +48,29 @@ pub fn apply_statement<'tcx>(
                 }
             }
         } else if let Some(src) = rvalue_local(rvalue) {
-            state.escape_local(src);
+            // For simple field writes (at most one leading Deref + field projections),
+            // preserve raw-pointer ownership in field_owned keyed by (base, field_idx)
+            // so a later field read can restore tracking. This bridges the intra-function
+            // struct-field freed_kind gap: `self.ptr = raw; ...; from_raw(self.ptr)` fires.
+            if let Some(field_idx) = last_simple_field_idx(dst.projection.as_ref()) {
+                let key = (dst.local, field_idx);
+                // Overwrite the old field entry (new value assigned to this field).
+                if let Some(objs) = state.points_to.remove(&src) {
+                    if !objs.is_empty() {
+                        state.field_owned.insert(key, objs);
+                    } else {
+                        state.field_owned.remove(&key);
+                    }
+                } else {
+                    // Source is untracked — clear any stale field entry.
+                    state.field_owned.remove(&key);
+                }
+                // Still clear protocol/alias tracking on the source local.
+                state.local_proto.remove(&src);
+                state.owner_alias.remove(&src);
+            } else {
+                state.escape_local(src);
+            }
         }
         return;
     }
@@ -97,6 +119,9 @@ pub fn apply_statement<'tcx>(
     state.index_bounded_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.index_bounded_or_eq_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.const_ptr_cast.remove(&dst_local);
+    // When the struct base local is reassigned, any field-ownership we tracked for
+    // it is now stale (a different value lives in that local).
+    state.clear_field_owned_for(dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -356,7 +381,18 @@ pub fn apply_statement<'tcx>(
         {
             let src_base = src.local;
             if let Some(objs) = state.points_to.get(&src_base).cloned() {
+                // Base struct local already carries aggregate tracking (e.g. from
+                // Aggregate construction). Propagate to field read destination.
                 state.points_to.insert(dst_local, objs);
+            } else if let Some(field_idx) = last_simple_field_idx(src.projection.as_ref()) {
+                // Field-owned tracking: restore objects stored into this specific field.
+                // This is the read side of the field_owned domain — it lets freed_kind
+                // see that a field-stored pointer was later freed (intra-function UAF).
+                if let Some(objs) = state.field_owned.get(&(src_base, field_idx)).cloned() {
+                    state.points_to.insert(dst_local, objs);
+                } else {
+                    state.points_to.remove(&dst_local);
+                }
             } else {
                 state.points_to.remove(&dst_local);
             }
@@ -849,6 +885,10 @@ pub fn apply_statement<'tcx>(
             // E.g. `_dst = move _src.field` leaves `_src` tracked but field is gone.
             if let Rvalue::Use(Operand::Move(src), _) = rvalue {
                 if !src.projection.is_empty() {
+                    // Moving out of a field consumes it — clear field_owned entry.
+                    if let Some(field_idx) = last_simple_field_idx(src.projection.as_ref()) {
+                        state.field_owned.remove(&(src.local, field_idx));
+                    }
                     state.points_to.remove(&src.local);
                     state.local_proto.remove(&src.local);
                     state.init.remove(&src.local);
@@ -1941,6 +1981,23 @@ pub fn first_arg_local<'tcx>(
     args: &[rustc_span::Spanned<Operand<'tcx>>],
 ) -> Option<Local> {
     args.first().and_then(|a| operand_local(&a.node))
+}
+
+/// Extract the field index of the last `Field` element in `projection` for
+/// "simple" field paths: at most one leading Deref, then Field/Index/Downcast only.
+/// Returns `None` if the projection contains a nested Deref (pointer-chase through
+/// a field) — those are too complex to track with flat field_owned keys.
+pub fn last_simple_field_idx<'tcx>(
+    projection: &[ProjectionElem<Local, rustc_middle::ty::Ty<'tcx>>],
+) -> Option<u32> {
+    // A nested Deref after position 0 means we're following a pointer stored in
+    // a field — bail out rather than conflating different pointer levels.
+    if projection.iter().enumerate().any(|(i, e)| i > 0 && matches!(e, ProjectionElem::Deref)) {
+        return None;
+    }
+    projection.iter().rev().find_map(|e| {
+        if let ProjectionElem::Field(f, _) = e { Some(f.as_u32()) } else { None }
+    })
 }
 
 /// Extract the **base** Local from the first call argument, accepting projections.

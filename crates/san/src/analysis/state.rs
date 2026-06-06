@@ -209,6 +209,15 @@ pub struct BlockState {
     /// This is the dominant "shared mutation" CVE pattern: `Arc::as_ptr() as *mut T`.
     /// Join = UNION (may-have-const-origin on any path → flag on all paths).
     pub const_ptr_cast: HashSet<Local>,
+
+    // ── struct-field ownership domain ──────────────────────────────────────
+    /// (base_local, field_idx) → set of raw-owned objects stored into that field.
+    /// Populated when `(*base).field_N = move tracked_ptr` and the source has
+    /// `RawOwned` (or any tracked) objects — instead of escaping them, we keep
+    /// them here so that `dst = (*base).field_N` can restore tracking.
+    /// Key: base local (the struct or `&mut Struct` reference) + field index (u32).
+    /// Join = UNION: if the field held a tracked pointer on ANY path, we may see it.
+    pub field_owned: HashMap<(Local, u32), BTreeSet<ObjectId>>,
 }
 
 impl BlockState {
@@ -543,6 +552,18 @@ impl BlockState {
             }
         }
 
+        // field_owned: UNION — if a field held a tracked pointer on any path, keep it.
+        for (key, objs) in &other.field_owned {
+            let entry = result.field_owned.entry(*key).or_default();
+            let before = entry.len();
+            for &id in objs {
+                entry.insert(id);
+            }
+            if entry.len() != before {
+                changed = true;
+            }
+        }
+
         // lt_for / le_for: UNION — conditional facts.
         for (local, pair) in &other.lt_for {
             result.lt_for.entry(*local).or_insert_with(|| { changed = true; *pair });
@@ -603,6 +624,12 @@ impl BlockState {
             .get(&ptr)
             .into_iter()
             .flat_map(|s| s.iter().copied())
+    }
+
+    /// Remove all `field_owned` entries whose base local is `base`.
+    /// Called when `base` is reassigned (no longer names the same struct).
+    pub fn clear_field_owned_for(&mut self, base: Local) {
+        self.field_owned.retain(|(l, _), _| *l != base);
     }
 
     /// Mark all objects reachable from `local` as Escaped and remove tracking.
