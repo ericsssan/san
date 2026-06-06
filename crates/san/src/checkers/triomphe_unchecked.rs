@@ -50,9 +50,6 @@ impl Checker for TriompheUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("triomphe") {
-                continue;
-            }
 
             let is_from_raw = path.ends_with("::from_raw")
                 || path.ends_with("::from_raw_slice")

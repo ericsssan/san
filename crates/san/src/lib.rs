@@ -159,7 +159,6 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::heapless_unchecked::HeaplessUnchecked,
     &checkers::not_nan_unchecked::NotNanUnchecked,
     &checkers::nix_fork::NixFork,
-    &checkers::spin_unsafe::SpinUnsafe,
     &checkers::triomphe_unchecked::TriompheUnchecked,
     &checkers::nalgebra_unchecked::NalgebraUnchecked,
     &checkers::zerocopy_unchecked::ZerocopyUnchecked,

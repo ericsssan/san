@@ -35,7 +35,7 @@ impl Checker for ArrayvecUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
-            if path.ends_with("::into_inner_unchecked") && path.contains("arrayvec") {
+            if path.ends_with("::into_inner_unchecked") {
                 // Suppress when the vector is proven exactly full (`len == CAP`)
                 // on all paths — e.g. `if v.len() == v.capacity() { v.into_inner_unchecked() }`.
                 if let Some(state) = flow.state_before_terminator(tcx, body, bb) {

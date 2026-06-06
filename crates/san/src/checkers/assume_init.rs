@@ -30,10 +30,16 @@ impl Checker for AssumeInit {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
             let path = tcx.def_path_str(def_id);
 
-            let (fn_name, msg) = if path.contains("MaybeUninit") && path.contains("assume_init") {
+            let (fn_name, msg) = if path.ends_with("::assume_init")
+                || path.ends_with("::assume_init_ref")
+                || path.ends_with("::assume_init_mut")
+                || path.ends_with("::assume_init_slice")
+                || path.ends_with("::assume_init_slice_with_header")
+            {
                 (
                     path.rsplit("::").next().unwrap_or("assume_init"),
-                    "verify all bytes are initialized before calling `assume_init`",
+                    "all bytes must be fully initialized before calling `assume_init`; \
+                     reading uninitialized memory is immediate UB",
                 )
             } else if path.contains("ReadBuf") && path.ends_with("::assume_init") {
                 (
@@ -64,7 +70,9 @@ impl Checker for AssumeInit {
             // Suppress `assume_init` / `assume_init_ref` / `assume_init_mut` findings when
             // the receiver/self local is provably initialized according to the flow lattice.
             // Only suppress for MaybeUninit::assume_init* variants (not ReadBuf methods).
-            if path.contains("MaybeUninit") && path.contains("assume_init") {
+            if path.contains("MaybeUninit") && (path.ends_with("::assume_init")
+                || path.ends_with("::assume_init_ref") || path.ends_with("::assume_init_mut"))
+            {
                 // The receiver is the first argument (MaybeUninit methods take self by value
                 // or by reference; the MIR arg[0] is the MaybeUninit local).
                 if let Some(state) = flow.state_before_terminator(tcx, body, bb) {

@@ -109,7 +109,6 @@ pub mod nix_mman;
 pub mod heapless_unchecked;
 pub mod not_nan_unchecked;
 pub mod nix_fork;
-pub mod spin_unsafe;
 pub mod triomphe_unchecked;
 pub mod nalgebra_unchecked;
 pub mod zerocopy_unchecked;

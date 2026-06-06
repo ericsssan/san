@@ -46,9 +46,6 @@ impl Checker for LockApiUnsafe {
 
             let path = tcx.def_path_str(def_id);
 
-            if !path.contains("lock_api") && !path.contains("parking_lot") {
-                continue;
-            }
 
             let (fn_name, note) = if path.ends_with("::force_unlock_write_fair") {
                 (
@@ -111,6 +108,20 @@ impl Checker for LockApiUnsafe {
                     "Mutex::make_guard_unchecked",
                     "creates a mutex guard without acquiring the lock; if no lock is held, \
                      two guards for the same T exist simultaneously → aliased &mut T (UB)",
+                )
+            } else if path.ends_with("::force_read_decrement") {
+                (
+                    "RwLock::force_read_decrement",
+                    "decrements the reader count without a read guard; underflowing the count \
+                     or releasing a count that a writer is waiting on can unblock a writer while \
+                     readers are still active — data race (UB)",
+                )
+            } else if path.ends_with("::force_write_unlock") {
+                (
+                    "RwLock::force_write_unlock",
+                    "releases the write lock without a write guard; any live &mut T derived from \
+                     the previous write lock is now aliased — two simultaneous mutable references \
+                     is immediate UB",
                 )
             } else {
                 continue;

@@ -29,7 +29,10 @@ impl Checker for FromBytesUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.ends_with("::from_bytes_unchecked") {
+            if !path.ends_with("::from_bytes_unchecked")
+                && !path.ends_with("::from_slice_unchecked")
+                && !path.ends_with("::from_slice_unchecked_mut")
+            {
                 continue;
             }
 
