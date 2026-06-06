@@ -33,6 +33,35 @@ impl Checker for BitvecUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
+
+            // copy_within_unchecked and set_aliased_unchecked: names are specific enough
+            // to fire on any crate without requiring the bitvec crate filter.
+            if path.ends_with("::copy_within_unchecked") {
+                findings.push(Finding {
+                    rule_id: "bitvec_unchecked",
+                    severity: Severity::Warning,
+                    span: terminator.source_info.span,
+                    message: "`copy_within_unchecked` — copies bits (or elements) within the \
+                              slice without verifying that src and dest ranges are in-bounds; \
+                              out-of-bounds access is UB; use copy_within() for the checked variant"
+                        .to_string(),
+                });
+                continue;
+            }
+            if path.ends_with("::set_aliased_unchecked") {
+                findings.push(Finding {
+                    rule_id: "bitvec_unchecked",
+                    severity: Severity::Warning,
+                    span: terminator.source_info.span,
+                    message: "`set_aliased_unchecked` — writes to a shared location without \
+                              atomic operations; concurrent access from multiple threads is a \
+                              data race (UB); ensure exclusive access or use atomic storage types"
+                        .to_string(),
+                });
+                continue;
+            }
+
+            // set_unchecked / replace_unchecked: too generic without the BitSlice type guard.
             if !path.contains("bitvec") {
                 continue;
             }
@@ -48,19 +77,6 @@ impl Checker for BitvecUnchecked {
                     "BitSlice::replace_unchecked",
                     "replaces a bit without checking that index < self.len(); out-of-bounds access \
                      is immediate UB; use the checked replace() method instead",
-                )
-            } else if path.ends_with("::copy_within_unchecked") {
-                (
-                    "BitSlice::copy_within_unchecked",
-                    "copies bits within the slice without verifying that src and dest ranges are \
-                     in-bounds; out-of-bounds access is UB; use copy_within() for checked variant",
-                )
-            } else if path.ends_with("::set_aliased_unchecked") {
-                (
-                    "BitSlice::set_aliased_unchecked",
-                    "writes to a shared bit without atomic operations; concurrent access from \
-                     multiple threads is a data race (UB); ensure exclusive access or use \
-                     atomic storage types",
                 )
             } else {
                 continue;

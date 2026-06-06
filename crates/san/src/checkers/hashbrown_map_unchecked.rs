@@ -48,10 +48,6 @@ impl Checker for HashbrownMapUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
-            if !path.contains("hashbrown") {
-                continue;
-            }
-
             let (fn_name, note) = if path.ends_with("::insert_unique_unchecked")
                 && path.contains("HashSet")
             {
@@ -68,9 +64,14 @@ impl Checker for HashbrownMapUnchecked {
                      two entries with the same key are created, causing future lookups to return \
                      either one (logical UB); use insert() or entry() instead",
                 )
-            } else if path.ends_with("::replace_key_unchecked")
-                && path.contains("hashbrown")
-            {
+            } else if path.ends_with("::insert_unique_unchecked") {
+                (
+                    "insert_unique_unchecked",
+                    "inserts without checking for duplicate keys or values — if the entry already \
+                     exists, two identical entries are created, violating the collection's \
+                     uniqueness invariant; use the checked insert instead",
+                )
+            } else if path.ends_with("::replace_key_unchecked") {
                 (
                     "OccupiedEntry::replace_key_unchecked",
                     "replaces the key without verifying that the new key hashes to the same \

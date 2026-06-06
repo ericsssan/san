@@ -39,15 +39,14 @@ impl Checker for StepUnchecked {
 
             let path = tcx.def_path_str(def_id);
 
-            let (fn_name, note) = if path.ends_with("forward_unchecked") && path.contains("Step")
-            {
+            let (fn_name, note) = if path.ends_with("forward_unchecked") {
                 (
                     "Step::forward_unchecked",
                     "start + count must not overflow the type's range; overflow is immediate UB \
                      and may cause out-of-bounds range iteration; use Step::forward_checked \
                      (returns Option) or verify the count before calling",
                 )
-            } else if path.ends_with("backward_unchecked") && path.contains("Step") {
+            } else if path.ends_with("backward_unchecked") {
                 (
                     "Step::backward_unchecked",
                     "start - count must not underflow the type's minimum value; underflow is \

@@ -85,6 +85,13 @@ impl Checker for AsciiUnchecked {
                      representation — this call is UB for non-ASCII bytes; \
                      use u8::as_ascii() which returns Option",
                 )
+            } else if path.ends_with("::as_ascii_unchecked") {
+                (
+                    path.rsplit("::").next().unwrap_or("as_ascii_unchecked"),
+                    "caller must guarantee every byte/code-point is valid ASCII (< 128); \
+                     non-ASCII input produces an invalid ascii::Char bit pattern (UB); \
+                     use the checked variant which returns Option",
+                )
             } else {
                 continue;
             };
