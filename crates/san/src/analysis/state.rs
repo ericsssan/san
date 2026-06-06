@@ -210,6 +210,17 @@ pub struct BlockState {
     /// Join = UNION (may-have-const-origin on any path → flag on all paths).
     pub const_ptr_cast: HashSet<Local>,
 
+    // ── allocation-size overflow domain ────────────────────────────────────
+    /// Locals whose value was produced by arithmetic (Mul or Add) where the
+    /// result could exceed `isize::MAX` — the maximum valid allocation size per
+    /// Rust's memory model. Set when either operand lacks a proven upper bound,
+    /// or when proven bounds show the product/sum can exceed isize::MAX.
+    /// Cleared when the destination has proven-safe bounds (both operands known
+    /// and their product/sum ≤ isize::MAX). Fires `alloc_size_overflow` at
+    /// `Layout::from_size_align_unchecked(size, …)` when size is flagged here.
+    /// Join = UNION (potential overflow on any path → flag all paths).
+    pub mul_overflow: HashSet<Local>,
+
     // ── struct-field ownership domain ──────────────────────────────────────
     /// (base_local, field_idx) → set of raw-owned objects stored into that field.
     /// Populated when `(*base).field_N = move tracked_ptr` and the source has
@@ -548,6 +559,13 @@ impl BlockState {
         // const_ptr_cast: UNION — flag mutation if const-origin is possible on any path.
         for &l in &other.const_ptr_cast {
             if result.const_ptr_cast.insert(l) {
+                changed = true;
+            }
+        }
+
+        // mul_overflow: UNION — flag overflow if possible on any path.
+        for &l in &other.mul_overflow {
+            if result.mul_overflow.insert(l) {
                 changed = true;
             }
         }

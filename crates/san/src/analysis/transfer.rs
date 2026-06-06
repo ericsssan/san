@@ -119,6 +119,7 @@ pub fn apply_statement<'tcx>(
     state.index_bounded_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.index_bounded_or_eq_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.const_ptr_cast.remove(&dst_local);
+    state.mul_overflow.remove(&dst_local);
     // When the struct base local is reassigned, any field-ownership we tracked for
     // it is now stale (a different value lives in that local).
     state.clear_field_owned_for(dst_local);
@@ -163,6 +164,7 @@ pub fn apply_statement<'tcx>(
             propagate_set!(finite);
             propagate_set!(fd_origin);
             propagate_set!(fd_consumed);
+            propagate_set!(mul_overflow);
             // Propagate cast_origin: if src was itself a cast, dst inherits that origin.
             if let Some(&orig) = state.cast_origin.get(&src.local) {
                 state.cast_origin.insert(dst_local, orig);
@@ -405,6 +407,15 @@ pub fn apply_statement<'tcx>(
             state.gt_facts.remove(&dst_local);
             state.bounded.remove(&dst_local);
             state.bounded_or_eq.remove(&dst_local);
+            // Propagate mul_overflow through field reads. This is needed for the
+            // CheckedBinaryOp pattern: `_tuple = CheckedMul(n, 8)` sets mul_overflow
+            // on the tuple; `_size = copy _tuple.0` extracts the value — we propagate
+            // so the checker sees mul_overflow on the actual size local.
+            if state.mul_overflow.contains(&src_base) {
+                state.mul_overflow.insert(dst_local);
+            } else {
+                state.mul_overflow.remove(&dst_local);
+            }
         }
         // Reference / raw-pointer creation (`_ref = &_struct` or `_ptr = &raw const (*ref)`)
         // where the base local carries raw-pointer tracking. Propagate points_to so that
@@ -833,6 +844,121 @@ pub fn apply_statement<'tcx>(
                     state.ge_facts.remove(&dst_local);
                     state.le_facts.remove(&dst_local);
                     state.gt_facts.remove(&dst_local);
+                }
+                // Mul: derive const_upper for the product and flag mul_overflow when
+                // the product might exceed isize::MAX (the max valid allocation size).
+                // This catches `n * size_of::<T>()` patterns in unchecked allocators.
+                BinOp::Mul => {
+                    let ua = const_u64(op1)
+                        .or_else(|| operand_local(op1).and_then(|l| state.const_upper.get(&l).copied()));
+                    let ub = const_u64(op2)
+                        .or_else(|| operand_local(op2).and_then(|l| state.const_upper.get(&l).copied()));
+                    match (ua, ub) {
+                        (Some(a), Some(b)) => {
+                            let product = (a as u128).saturating_mul(b as u128);
+                            // Derive const_upper for the product (capped at u64::MAX).
+                            let product_u64 = product.min(u64::MAX as u128) as u64;
+                            let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                            *e = (*e).min(product_u64);
+                            // Flag overflow only when product can exceed isize::MAX.
+                            if product > isize::MAX as u128 {
+                                state.mul_overflow.insert(dst_local);
+                            } else {
+                                state.mul_overflow.remove(&dst_local);
+                            }
+                        }
+                        _ => {
+                            // At least one operand unbounded → may overflow.
+                            state.mul_overflow.insert(dst_local);
+                        }
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                // Add: flag mul_overflow when the integer sum might exceed isize::MAX.
+                // Targets `len + extra` patterns before unchecked allocation.
+                // Only fires for integer dst types; pointer offset uses BinOp::Offset.
+                BinOp::Add => {
+                    let dst_ty = body.local_decls[dst_local].ty;
+                    if matches!(dst_ty.kind(), TyKind::Int(..) | TyKind::Uint(..)) {
+                        let ua = const_u64(op1)
+                            .or_else(|| operand_local(op1).and_then(|l| state.const_upper.get(&l).copied()));
+                        let ub = const_u64(op2)
+                            .or_else(|| operand_local(op2).and_then(|l| state.const_upper.get(&l).copied()));
+                        match (ua, ub) {
+                            (Some(a), Some(b)) => {
+                                let sum = (a as u128) + (b as u128);
+                                let sum_u64 = sum.min(u64::MAX as u128) as u64;
+                                let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                                *e = (*e).min(sum_u64);
+                                if sum > isize::MAX as u128 {
+                                    state.mul_overflow.insert(dst_local);
+                                } else {
+                                    state.mul_overflow.remove(&dst_local);
+                                }
+                            }
+                            _ => {
+                                state.mul_overflow.insert(dst_local);
+                            }
+                        }
+                    }
+                    state.lt_facts.remove(&dst_local);
+                    state.ge_facts.remove(&dst_local);
+                    state.le_facts.remove(&dst_local);
+                    state.gt_facts.remove(&dst_local);
+                }
+                // MulWithOverflow / AddWithOverflow: debug-mode checked variants.
+                // Produce a (value, overflow_bool) tuple whose field 0 is extracted
+                // in the next statement. Mirror the Mul/Add handling so that
+                // mul_overflow is set on the tuple; the field read arm propagates it.
+                BinOp::MulWithOverflow => {
+                    let ua = const_u64(op1)
+                        .or_else(|| operand_local(op1).and_then(|l| state.const_upper.get(&l).copied()));
+                    let ub = const_u64(op2)
+                        .or_else(|| operand_local(op2).and_then(|l| state.const_upper.get(&l).copied()));
+                    match (ua, ub) {
+                        (Some(a), Some(b)) => {
+                            let product = (a as u128).saturating_mul(b as u128);
+                            let product_u64 = product.min(u64::MAX as u128) as u64;
+                            let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                            *e = (*e).min(product_u64);
+                            if product > isize::MAX as u128 {
+                                state.mul_overflow.insert(dst_local);
+                            } else {
+                                state.mul_overflow.remove(&dst_local);
+                            }
+                        }
+                        _ => { state.mul_overflow.insert(dst_local); }
+                    }
+                }
+                BinOp::AddWithOverflow => {
+                    let dst_ty = body.local_decls[dst_local].ty;
+                    let elem_ty = match dst_ty.kind() {
+                        rustc_middle::ty::TyKind::Tuple(fields) => fields.first().copied().unwrap_or(dst_ty),
+                        _ => dst_ty,
+                    };
+                    if matches!(elem_ty.kind(), TyKind::Int(..) | TyKind::Uint(..)) {
+                        let ua = const_u64(op1)
+                            .or_else(|| operand_local(op1).and_then(|l| state.const_upper.get(&l).copied()));
+                        let ub = const_u64(op2)
+                            .or_else(|| operand_local(op2).and_then(|l| state.const_upper.get(&l).copied()));
+                        match (ua, ub) {
+                            (Some(a), Some(b)) => {
+                                let sum = (a as u128) + (b as u128);
+                                let sum_u64 = sum.min(u64::MAX as u128) as u64;
+                                let e = state.const_upper.entry(dst_local).or_insert(u64::MAX);
+                                *e = (*e).min(sum_u64);
+                                if sum > isize::MAX as u128 {
+                                    state.mul_overflow.insert(dst_local);
+                                } else {
+                                    state.mul_overflow.remove(&dst_local);
+                                }
+                            }
+                            _ => { state.mul_overflow.insert(dst_local); }
+                        }
+                    }
                 }
                 _ => {
                     state.lt_facts.remove(&dst_local);

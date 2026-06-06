@@ -190,6 +190,7 @@ declare -A EXPECTED=(
     [transmute_lifetime]="transmute_lifetime"
     [layout_unchecked_safe]=""
     [field_owned_double_free]="ownership_double_free"
+    [alloc_size_overflow]="alloc_size_overflow"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""

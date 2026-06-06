@@ -103,6 +103,7 @@ pub mod push_unchecked;
 pub mod precond_propagation;
 pub mod cast_away_const;
 pub mod transmute_lifetime;
+pub mod alloc_size_overflow;
 pub mod ndarray_unchecked;
 pub mod hashbrown_raw;
 pub mod smallvec_unchecked;

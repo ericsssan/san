@@ -183,6 +183,8 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::cast_away_const::CastAwayConst,
     // Lifetime extension via transmute: &'a T → &'static T.
     &checkers::transmute_lifetime::TransmuteLifetime,
+    // Allocation-size arithmetic overflow: n * size_of::<T>() may wrap.
+    &checkers::alloc_size_overflow::AllocSizeOverflow,
     // Flow-sensitive checkers (use flow results for precise detection).
     &checkers::flow::ownership::OwnershipProtocol,
     &checkers::flow::epoch_guard::EpochGuard,
