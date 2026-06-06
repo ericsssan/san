@@ -67,6 +67,31 @@ impl Checker for SliceGetUnchecked {
                             continue;
                         }
                     }
+                    // Special case: get_unchecked(0) when the collection is proven non-empty.
+                    // A constant index of 0 is always valid if len >= 1. Proved by:
+                    //   • The len() result being in `nonzero` (from `if len != 0` / `if !is_empty()`)
+                    //   • idx being a constant 0 (idx_local = None)
+                    // This suppresses `if !coll.is_empty() { coll.get_unchecked(0) }`.
+                    if idx_local.is_none() {
+                        let idx_is_zero = args.get(1).map_or(false, |a| {
+                            if let Operand::Constant(c) = &a.node {
+                                c.const_.try_to_scalar_int()
+                                    .and_then(|si| si.to_bits(si.size()).try_into().ok())
+                                    .map_or(false, |v: u64| v == 0)
+                            } else {
+                                false
+                            }
+                        });
+                        if idx_is_zero {
+                            if let Some(recv) = recv_local {
+                                let coll_nonempty = state.len_of.iter()
+                                    .any(|(len_l, &c)| c == recv && state.nonzero.contains(len_l));
+                                if coll_nonempty {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
