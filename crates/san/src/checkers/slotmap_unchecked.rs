@@ -24,18 +24,23 @@
 /// Safe alternatives: `slot_map.get_disjoint_mut([k1, k2])` (returns None on
 /// invalid/duplicate keys), or sequential `get_mut` calls.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct SlotmapUnchecked;
 
 impl Checker for SlotmapUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
@@ -45,6 +50,30 @@ impl Checker for SlotmapUnchecked {
             }
 
             if path.ends_with("::get_disjoint_unchecked_mut") {
+                // arg[0] = &mut self; arg[1] = [K; N] key array.
+                // Suppress when all pairs of key components are proven ≠:
+                // the caller wrote `if k1 != k2` before calling, so duplicate
+                // keys (which produce aliased &mut, immediate UB) are impossible.
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    if let Some(arr_local) = args.get(1).and_then(|a| match &a.node {
+                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                            Some(p.local)
+                        }
+                        _ => None,
+                    }) {
+                        if let Some(components) = state.array_components_of(arr_local) {
+                            if components.len() > 1 {
+                                let all_ne = components.iter().enumerate().all(|(i, &a)| {
+                                    components[..i].iter().all(|&b| state.locals_are_ne(a, b))
+                                });
+                                if all_ne {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 findings.push(Finding {
                     rule_id: "slotmap_unchecked",
                     severity: Severity::Warning,

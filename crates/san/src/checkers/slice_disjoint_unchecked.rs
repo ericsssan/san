@@ -22,23 +22,58 @@
 ///
 /// Stable since Rust 1.87.
 use crate::{Checker, Finding, Severity};
-use rustc_middle::mir::{Body, TerminatorKind};
+use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
 
 pub struct SliceDisjointUnchecked;
 
 impl Checker for SliceDisjointUnchecked {
-    fn check<'tcx>(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>, _flow: &crate::analysis::FlowResults) -> Vec<Finding> {
+    fn check<'tcx>(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        body: &Body<'tcx>,
+        flow: &crate::analysis::FlowResults,
+    ) -> Vec<Finding> {
         let mut findings = Vec::new();
 
-        for block_data in body.basic_blocks.iter() {
+        for (bb, block_data) in body.basic_blocks.iter_enumerated() {
             let Some(terminator) = &block_data.terminator else { continue };
-            let TerminatorKind::Call { func, .. } = &terminator.kind else { continue };
+            let TerminatorKind::Call { func, args, .. } = &terminator.kind else { continue };
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.ends_with("get_disjoint_unchecked_mut") || path.contains("HashMap") {
+            // Only the slice primitive implementation; not HashMap, slotmap, etc.
+            // (those have dedicated checkers with their own suppression logic).
+            if !path.ends_with("get_disjoint_unchecked_mut")
+                || path.contains("HashMap")
+                || path.contains("slotmap")
+            {
                 continue;
+            }
+
+            // Suppress when all index components are provably in-bounds AND
+            // pairwise distinct: `if i < len && j < len && i != j { ... }`.
+            // arg[0] = &mut self (the slice); arg[1] = [i, j, ...] index array.
+            if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                if let Some(arr_local) = args.get(1).and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(p.local)
+                    }
+                    _ => None,
+                }) {
+                    if let Some(components) = state.array_components_of(arr_local) {
+                        if !components.is_empty() {
+                            let all_bounded = components.iter().all(|&c| state.index_is_fully_bounded(c));
+                            let all_ne = components.len() <= 1
+                                || components.iter().enumerate().all(|(i, &a)| {
+                                    components[..i].iter().all(|&b| state.locals_are_ne(a, b))
+                                });
+                            if all_bounded && all_ne {
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
 
             findings.push(Finding {

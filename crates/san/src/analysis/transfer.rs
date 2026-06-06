@@ -929,6 +929,25 @@ pub fn apply_terminator<'tcx>(
                 state.thread_spawned = true;
             }
 
+            // PartialEq::ne / PartialEq::eq called on struct types (e.g. slotmap keys)
+            // compile to method calls, not BinOp::Ne/Eq.  Record the same pair map so
+            // that a `if k1 != k2 { get_disjoint_unchecked_mut([k1, k2]) }` guard on
+            // struct-typed keys reaches the same SwitchInt edge suppression as integers.
+            // args[0] = &self, args[1] = &other — look through ref_base to get the
+            // referent locals.
+            if (path.ends_with("::ne") || path.ends_with("::eq")) && args.len() == 2 {
+                let arg_deref = |idx: usize| -> Option<Local> {
+                    args.get(idx).and_then(|a| operand_local(&a.node)).map(|l| state.deref_base(l))
+                };
+                if let (Some(a), Some(b)) = (arg_deref(0), arg_deref(1)) {
+                    if path.ends_with("::ne") {
+                        state.ne_pair_if_true.insert(dest, (a, b));
+                    } else {
+                        state.eq_pair_if_true.insert(dest, (a, b));
+                    }
+                }
+            }
+
             if is_raw_realloc(&path) {
                 // realloc(old_ptr, layout, new_size): the old pointer is consumed (like dealloc)
                 // and the return value is a fresh raw-owned allocation (like alloc).

@@ -108,16 +108,24 @@ impl Checker for UnsafeFnCall {
                 }
                 if uaf_found { continue; }
                 if any_bounded { continue; }
-                // Pairwise disequality: for two-key APIs like `get2_unchecked_mut`,
-                // suppress if any two arg locals are proven ≠ (aliasing impossible).
+                // Pairwise disequality: for two-key APIs like `get2_unchecked_mut`
+                // or `get_disjoint_unchecked_mut([k1, k2])`, suppress if any two
+                // locals (direct args OR components of array args) are proven ≠.
                 let arg_locals: Vec<_> = args.iter().filter_map(|a| match &a.node {
                     Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
                         Some(p.local)
                     }
                     _ => None,
                 }).collect();
-                let any_ne_pair = arg_locals.iter().enumerate().any(|(i, &a)| {
-                    arg_locals[..i].iter().any(|&b| state.locals_are_ne(a, b))
+                // Expand array aggregates so components participate in ne checks.
+                let mut expanded_locals = arg_locals.clone();
+                for &l in &arg_locals {
+                    if let Some(comps) = state.array_components_of(l) {
+                        expanded_locals.extend_from_slice(comps);
+                    }
+                }
+                let any_ne_pair = expanded_locals.iter().enumerate().any(|(i, &a)| {
+                    expanded_locals[..i].iter().any(|&b| state.locals_are_ne(a, b))
                 });
                 if any_ne_pair { continue; }
                 // matrixmultiply xgemm: suppress when row-major stride coherence proven.
