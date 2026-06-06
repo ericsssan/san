@@ -179,6 +179,8 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     // Interprocedural precondition propagation: fires at call sites where a
     // callee has implicit unsafe preconditions not met by the caller.
     &checkers::precond_propagation::PrecondPropagation,
+    // Cast-away-const aliased mutation: *const T → *mut T + write = UB.
+    &checkers::cast_away_const::CastAwayConst,
     // Flow-sensitive checkers (use flow results for precise detection).
     &checkers::flow::ownership::OwnershipProtocol,
     &checkers::flow::epoch_guard::EpochGuard,

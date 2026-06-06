@@ -202,6 +202,13 @@ pub struct BlockState {
     /// Used to escalate `env::set_var` when provably concurrent. Join = OR.
     pub thread_spawned: bool,
 
+    // ── cast-away-const aliasing domain ────────────────────────────────────
+    /// Locals whose `*mut T` value was obtained by casting a `*const T` (or
+    /// `*const T`-derived) pointer via `PtrToPtr`/Transmute. Writing through
+    /// such a pointer is UB if the original pointee was not behind `UnsafeCell`.
+    /// This is the dominant "shared mutation" CVE pattern: `Arc::as_ptr() as *mut T`.
+    /// Join = UNION (may-have-const-origin on any path → flag on all paths).
+    pub const_ptr_cast: HashSet<Local>,
 }
 
 impl BlockState {
@@ -527,6 +534,13 @@ impl BlockState {
         if other.thread_spawned && !result.thread_spawned {
             result.thread_spawned = true;
             changed = true;
+        }
+
+        // const_ptr_cast: UNION — flag mutation if const-origin is possible on any path.
+        for &l in &other.const_ptr_cast {
+            if result.const_ptr_cast.insert(l) {
+                changed = true;
+            }
         }
 
         // lt_for / le_for: UNION — conditional facts.

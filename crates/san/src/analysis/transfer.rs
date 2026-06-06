@@ -96,6 +96,7 @@ pub fn apply_statement<'tcx>(
     state.le_for.remove(&dst_local);
     state.index_bounded_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.index_bounded_or_eq_for.retain(|&(i, c)| i != dst_local && c != dst_local);
+    state.const_ptr_cast.remove(&dst_local);
 
     // `dst = &base` or `dst = &(*base)` (reborrow): attribute `dst` back to the
     // borrowed collection so a `len()`/`capacity()` call whose receiver is this
@@ -240,6 +241,12 @@ pub fn apply_statement<'tcx>(
             } else {
                 state.bounded_or_eq.remove(&dst_local);
             }
+            // Transfer const_ptr_cast: move src → dst, clear src.
+            if state.const_ptr_cast.remove(&src_local) {
+                state.const_ptr_cast.insert(dst_local);
+            } else {
+                state.const_ptr_cast.remove(&dst_local);
+            }
         }
         Rvalue::Use(Operand::Copy(src), _) if src.projection.is_empty() => {
             // Copy: alias — dst points to the same objects as src.
@@ -314,6 +321,12 @@ pub fn apply_statement<'tcx>(
                 state.bounded_or_eq.insert(dst_local);
             } else {
                 state.bounded_or_eq.remove(&dst_local);
+            }
+            // Copy const_ptr_cast: alias inherits the const-origin taint.
+            if state.const_ptr_cast.contains(&src_local) {
+                state.const_ptr_cast.insert(dst_local);
+            } else {
+                state.const_ptr_cast.remove(&dst_local);
             }
         }
         // Field read: `dst = src.field` (or `dst = src.0` for tuples). dst.projection
@@ -483,16 +496,26 @@ pub fn apply_statement<'tcx>(
         // the pointer refers into — dst points to the same objects as src. This
         // matters for stale-pointer detection: after a realloc, a *mut T → *const T
         // cast of the stale pointer must still carry the MaybeFreed state.
+        // Also tracks *const T → *mut T "cast-away-const" for mutation detection.
         Rvalue::Cast(
             CastKind::PtrToPtr | CastKind::Transmute,
             Operand::Copy(src) | Operand::Move(src),
-            _,
+            dst_ptr_ty,
         ) if src.projection.is_empty() => {
             let src_local = src.local;
             if let Some(objs) = state.points_to.get(&src_local).cloned() {
                 state.points_to.insert(dst_local, objs);
             } else {
                 state.points_to.remove(&dst_local);
+            }
+            // Track cast-away-const: *const T → *mut T or const-derived → *mut T.
+            let src_ty = body.local_decls[src_local].ty;
+            let dst_is_mut_ptr = matches!(dst_ptr_ty.kind(),
+                TyKind::RawPtr(_, rustc_middle::ty::Mutability::Mut));
+            let src_is_const_ptr = matches!(src_ty.kind(),
+                TyKind::RawPtr(_, rustc_middle::ty::Mutability::Not));
+            if dst_is_mut_ptr && (src_is_const_ptr || state.const_ptr_cast.contains(&src_local)) {
+                state.const_ptr_cast.insert(dst_local);
             }
             // Clear other non-pointer facts.
             state.local_proto.remove(&dst_local);

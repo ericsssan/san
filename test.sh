@@ -186,6 +186,7 @@ declare -A EXPECTED=(
     [cstring_double_free]="ownership_double_free"
     [summary_double_free]="ownership_double_free"
     [precond_propagation]="precond_violation"
+    [cast_away_const]="cast_away_const"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""
