@@ -187,6 +187,7 @@ declare -A EXPECTED=(
     [summary_double_free]="ownership_double_free"
     [precond_propagation]="precond_violation"
     [cast_away_const]="cast_away_const"
+    [transmute_lifetime]="transmute_lifetime"
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""

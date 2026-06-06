@@ -181,6 +181,8 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::precond_propagation::PrecondPropagation,
     // Cast-away-const aliased mutation: *const T → *mut T + write = UB.
     &checkers::cast_away_const::CastAwayConst,
+    // Lifetime extension via transmute: &'a T → &'static T.
+    &checkers::transmute_lifetime::TransmuteLifetime,
     // Flow-sensitive checkers (use flow results for precise detection).
     &checkers::flow::ownership::OwnershipProtocol,
     &checkers::flow::epoch_guard::EpochGuard,
