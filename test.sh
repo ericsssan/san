@@ -188,6 +188,7 @@ declare -A EXPECTED=(
     [precond_propagation]="precond_violation"
     [cast_away_const]="cast_away_const"
     [transmute_lifetime]="transmute_lifetime"
+    [layout_unchecked_safe]=""
     # hello and no_findings_safe_code are negative tests — must produce zero findings
     [hello]=""
     [no_findings_safe_code]=""
