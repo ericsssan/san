@@ -157,7 +157,6 @@ static CHECKERS: &[&(dyn Checker + Sync)] = &[
     &checkers::parking_lot_core_park::ParkingLotCorePark,
     &checkers::nix_mman::NixMman,
     &checkers::heapless_unchecked::HeaplessUnchecked,
-    &checkers::not_nan_unchecked::NotNanUnchecked,
     &checkers::nix_fork::NixFork,
     &checkers::triomphe_unchecked::TriompheUnchecked,
     &checkers::nalgebra_unchecked::NalgebraUnchecked,

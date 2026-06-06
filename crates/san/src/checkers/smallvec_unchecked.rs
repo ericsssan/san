@@ -32,7 +32,7 @@ impl Checker for SmallVecUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("smallvec") || !path.ends_with("::from_buf_and_len_unchecked") {
+            if !path.ends_with("::from_buf_and_len_unchecked") {
                 continue;
             }
 

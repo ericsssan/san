@@ -56,6 +56,13 @@ impl Checker for PushUnchecked {
                      the _unchecked variant skips the capacity assertion entirely — \
                      out-of-bounds write if the collection is already at capacity (UB)",
                 )
+            } else if path.ends_with("::pop_unchecked") {
+                (
+                    "pop_unchecked",
+                    "collection must be non-empty before this call; popping from an empty \
+                     collection reads uninitialized or out-of-bounds memory (immediate UB); \
+                     use pop() which returns Option and checks the length",
+                )
             } else {
                 continue;
             };

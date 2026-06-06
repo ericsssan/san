@@ -107,7 +107,6 @@ pub mod rkyv_unchecked;
 pub mod parking_lot_core_park;
 pub mod nix_mman;
 pub mod heapless_unchecked;
-pub mod not_nan_unchecked;
 pub mod nix_fork;
 pub mod triomphe_unchecked;
 pub mod nalgebra_unchecked;

@@ -37,28 +37,7 @@ impl Checker for BitvecUnchecked {
                 continue;
             }
 
-            let (fn_name, note) = if path.ends_with("::new_unchecked") && path.contains("BitIdx") {
-                (
-                    "BitIdx::new_unchecked",
-                    "idx must be < T::BITS (e.g., < 8 for u8); an out-of-range index used in \
-                     subsequent bit accesses crosses the storage word boundary — \
-                     out-of-bounds read/write (UB); use BitIdx::new(idx) → Option",
-                )
-            } else if path.ends_with("::new_unchecked") && path.contains("BitPos") {
-                (
-                    "BitPos::new_unchecked",
-                    "pos must be < T::BITS; an out-of-range position in bit manipulation \
-                     reads/writes past the storage word boundary (UB); \
-                     use BitPos::new(pos) → Option",
-                )
-            } else if path.ends_with("::new_unchecked") && path.contains("BitSel") {
-                (
-                    "BitSel::new_unchecked",
-                    "sel must have exactly one bit set (one-hot); zero or multi-bit selectors \
-                     violate the type invariant and cause incorrect bit masking operations; \
-                     use BitSel::new(sel) → Option to validate",
-                )
-            } else if path.ends_with("::set_unchecked") && path.contains("BitSlice") {
+            let (fn_name, note) = if path.ends_with("::set_unchecked") && path.contains("BitSlice") {
                 (
                     "BitSlice::set_unchecked",
                     "sets a bit without checking that index < self.len(); out-of-bounds access \
@@ -82,34 +61,6 @@ impl Checker for BitvecUnchecked {
                     "writes to a shared bit without atomic operations; concurrent access from \
                      multiple threads is a data race (UB); ensure exclusive access or use \
                      atomic storage types",
-                )
-            } else if path.ends_with("::from_slice_unchecked") && path.contains("BitSlice") {
-                (
-                    "BitSlice::from_slice_unchecked",
-                    "creates a BitSlice without verifying slice.len() * T::BITS <= isize::MAX; \
-                     if the length overflows a signed pointer the resulting slice is invalid (UB); \
-                     use BitSlice::from_slice() for the checked variant",
-                )
-            } else if path.ends_with("::from_slice_unchecked_mut") && path.contains("BitSlice") {
-                (
-                    "BitSlice::from_slice_unchecked_mut",
-                    "creates a mutable BitSlice without verifying length bounds; \
-                     overflow of isize makes the resulting slice invalid (UB); \
-                     use BitSlice::from_slice_mut() for the checked variant",
-                )
-            } else if path.ends_with("from_raw_parts_unchecked") && !path.ends_with("_mut") {
-                (
-                    "bitvec::slice::from_raw_parts_unchecked",
-                    "creates a &BitSlice from a raw BitPtr without validating that the pointer \
-                     is well-aligned, non-null, and that the bit-length is in-bounds; \
-                     any violation is immediate UB; use from_raw_parts() which performs checks",
-                )
-            } else if path.ends_with("from_raw_parts_unchecked_mut") {
-                (
-                    "bitvec::slice::from_raw_parts_unchecked_mut",
-                    "creates a &mut BitSlice from a raw BitPtr without any safety checks; \
-                     invalid pointer or out-of-bounds length is immediate UB; \
-                     use from_raw_parts_mut() which performs checks",
                 )
             } else {
                 continue;

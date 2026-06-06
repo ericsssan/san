@@ -42,18 +42,13 @@ impl Checker for NonZeroNewUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            // Matches NonZeroU8::new_unchecked, NonZeroUsize::new_unchecked, etc.
-            // and the new unified NonZero::<T>::new_unchecked / from_mut_unchecked forms.
-            if !path.contains("NonZero") {
-                continue;
-            }
-
             let (fn_name, msg) = if path.ends_with("::new_unchecked") {
                 (
-                    "NonZero::new_unchecked",
-                    "passing zero is UB (corrupts niche optimization, breaks \
-                     Option<NonZero<T>> discriminant); use `NonZero::new` (returns Option) \
-                     unless zero is provably impossible",
+                    path.rsplit("::").next().unwrap_or("new_unchecked"),
+                    "the caller must satisfy the type's invariant; bypassing the checked \
+                     constructor may produce an invalid value — immediate UB if the invariant \
+                     is violated (e.g., zero for NonZero, NaN for NotNan wrapper types); \
+                     use the checked constructor (returns Option/Result) instead",
                 )
             } else if path.ends_with("::from_mut_unchecked") {
                 (
@@ -78,6 +73,13 @@ impl Checker for NonZeroNewUnchecked {
                      NonZero invariant and corrupts the Option<NonZero<T>> niche (UB); \
                      use checked_mul or saturating_mul instead (nightly `nonzero_ops`)",
                 )
+            } else if path.ends_with("::unchecked_new") {
+                (
+                    path.rsplit("::").next().unwrap_or("unchecked_new"),
+                    "the caller must satisfy the type's invariant (e.g., not NaN for float \
+                     wrappers); an invalid value produces immediate UB; use the checked \
+                     constructor (returns Option/Result) instead",
+                )
             } else {
                 continue;
             };
@@ -86,10 +88,14 @@ impl Checker for NonZeroNewUnchecked {
             // (e.g. guarded by `if n != 0`, `if n > 0`, `assert!(n != 0)`).
             // Only applies to new_unchecked/from_mut_unchecked — unchecked_add/mul
             // have overflow as an additional condition we cannot prove here.
-            if path.ends_with("::new_unchecked") || path.ends_with("::from_mut_unchecked") {
+            if path.ends_with("::new_unchecked")
+                || path.ends_with("::from_mut_unchecked")
+                || path.ends_with("::unchecked_new")
+            {
                 if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                     if let Some(arg) = first_arg_local(args) {
-                        if state.local_is_nonzero(arg) {
+                        // nonzero: `if n != 0` guards; finite: `if x.is_finite()` guards
+                        if state.local_is_nonzero(arg) || state.local_is_finite(arg) {
                             continue;
                         }
                     }

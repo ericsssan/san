@@ -46,10 +46,6 @@ impl Checker for NalgebraUnchecked {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.contains("nalgebra") {
-                continue;
-            }
-
             let (fn_name, note) = if path.ends_with("::matrix_mut_unchecked") {
                 (
                     "Rotation::matrix_mut_unchecked",
@@ -70,12 +66,6 @@ impl Checker for NalgebraUnchecked {
                     "slice bounds and stride arithmetic are not checked; if any element \
                      address (start + row*rstride + col*cstride) falls outside the slice, \
                      the read is an out-of-bounds access (UB)",
-                )
-            } else if path.ends_with("::from_slice_unchecked") && path.contains("nalgebra") {
-                (
-                    "MatrixView::from_slice_unchecked",
-                    "slice length is not checked; if start + rows*cols > data.len(), \
-                     the view reads beyond the slice boundary (out-of-bounds UB)",
                 )
             } else {
                 continue;

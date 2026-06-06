@@ -32,6 +32,8 @@ impl Checker for FromBytesUnchecked {
             if !path.ends_with("::from_bytes_unchecked")
                 && !path.ends_with("::from_slice_unchecked")
                 && !path.ends_with("::from_slice_unchecked_mut")
+                && !path.ends_with("::from_raw_parts_unchecked")
+                && !path.ends_with("::from_raw_parts_unchecked_mut")
             {
                 continue;
             }
