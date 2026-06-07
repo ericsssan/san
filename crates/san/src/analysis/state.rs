@@ -238,6 +238,16 @@ pub struct BlockState {
     /// Key: base local (the struct or `&mut Struct` reference) + field index (u32).
     /// Join = UNION: if the field held a tracked pointer on ANY path, we may see it.
     pub field_owned: HashMap<(Local, u32), BTreeSet<ObjectId>>,
+
+    // ── union variant tracking domain ──────────────────────────────────────
+    /// union-local (or ptr-to-union-local) → field index most recently written.
+    /// Only set for user-defined unions (stdlib unions like `MaybeUninit` are excluded).
+    /// Absence means the active field is unknown (field was never written, or the union
+    /// came from an opaque source, or two predecessor paths disagree).
+    /// Join = INTERSECTION with agreement: keep the entry only when ALL predecessor
+    /// paths wrote the SAME field index. Divergence → entry removed (unknown).
+    /// Cleared when the local is wholly reassigned (non-projected write).
+    pub active_variant: HashMap<Local, u32>,
 }
 
 impl BlockState {
@@ -596,6 +606,19 @@ impl BlockState {
             if entry.len() != before {
                 changed = true;
             }
+        }
+
+        // active_variant: INTERSECTION with agreement.
+        // Keep an entry only if all predecessor paths agree on which field is active.
+        let new_av: HashMap<Local, u32> = result.active_variant
+            .iter()
+            .filter_map(|(&l, &idx)| {
+                if other.active_variant.get(&l) == Some(&idx) { Some((l, idx)) } else { None }
+            })
+            .collect();
+        if new_av != result.active_variant {
+            changed = true;
+            result.active_variant = new_av;
         }
 
         // lt_for / le_for: UNION — conditional facts.

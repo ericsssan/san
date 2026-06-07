@@ -72,6 +72,11 @@ pub fn apply_statement<'tcx>(
                 state.escape_local(src);
             }
         }
+        // Track union field writes: record which field is active regardless of
+        // whether the rvalue is a local (constants like `u.a = 5` are common too).
+        if let Some((union_local, field_idx)) = direct_union_field_access(*dst, body, tcx) {
+            state.active_variant.insert(union_local, field_idx);
+        }
         return;
     }
 
@@ -121,6 +126,7 @@ pub fn apply_statement<'tcx>(
     state.const_ptr_cast.remove(&dst_local);
     state.mul_overflow.remove(&dst_local);
     state.layout_overflow.remove(&dst_local);
+    state.active_variant.remove(&dst_local);
     // When the struct base local is reassigned, any field-ownership we tracked for
     // it is now stale (a different value lives in that local).
     state.clear_field_owned_for(dst_local);
@@ -167,6 +173,13 @@ pub fn apply_statement<'tcx>(
             propagate_set!(fd_consumed);
             propagate_set!(mul_overflow);
             propagate_set!(layout_overflow);
+            // Propagate active_variant through union moves/copies.
+            if let Some(&field_idx) = state.active_variant.get(&src.local) {
+                state.active_variant.insert(dst_local, field_idx);
+                if is_move { state.active_variant.remove(&src.local); }
+            } else {
+                state.active_variant.remove(&dst_local);
+            }
             // Propagate cast_origin: if src was itself a cast, dst inherits that origin.
             if let Some(&orig) = state.cast_origin.get(&src.local) {
                 state.cast_origin.insert(dst_local, orig);
@@ -524,6 +537,15 @@ pub fn apply_statement<'tcx>(
             // checkers can verify each scalar component against `bounded`.
             // Only record when ALL operands are projection-free locals — if any
             // component is a constant or projected place, leave it as unknown.
+            // Union aggregate init: `MyUnion { field_a: val }` — track which field
+            // is being initialized so reads of other fields are flagged.
+            if let AggregateKind::Adt(def_id, _, _, _, Some(active_field)) = &**kind {
+                // Suppress stdlib unions (MaybeUninit, ManuallyDrop, etc.).
+                let krate = tcx.crate_name(def_id.krate);
+                if !matches!(krate.as_str(), "core" | "alloc" | "std") {
+                    state.active_variant.insert(dst_local, active_field.as_u32());
+                }
+            }
             if matches!(**kind, AggregateKind::Array(_) | AggregateKind::Tuple) {
                 let components: Option<Vec<Local>> = operands
                     .iter()
@@ -2147,6 +2169,41 @@ pub fn last_simple_field_idx<'tcx>(
     projection.iter().rev().find_map(|e| {
         if let ProjectionElem::Field(f, _) = e { Some(f.as_u32()) } else { None }
     })
+}
+
+/// If `place` is a direct user-defined union field access — `union_local.field_N`
+/// or `(*ptr_to_union).field_N` — return `(local, field_idx)` for use as the
+/// `active_variant` domain key. Excludes stdlib unions (MaybeUninit, ManuallyDrop,
+/// etc.) and nested accesses (struct.union_field.inner_field).
+pub fn direct_union_field_access<'tcx>(
+    place: rustc_middle::mir::Place<'tcx>,
+    body: &Body<'tcx>,
+    tcx: TyCtxt<'tcx>,
+) -> Option<(Local, u32)> {
+    let base_ty = body.local_decls[place.local].ty;
+    // Accept: the local IS a union, or it's a raw/shared pointer to a union.
+    // Reject anything deeper (struct containing a union, etc.).
+    let union_adt = match base_ty.kind() {
+        TyKind::Adt(adt, _) if adt.is_union() => *adt,
+        TyKind::RawPtr(inner, _) => match inner.kind() {
+            TyKind::Adt(adt, _) if adt.is_union() => *adt,
+            _ => return None,
+        },
+        TyKind::Ref(_, inner, _) => match inner.kind() {
+            TyKind::Adt(adt, _) if adt.is_union() => *adt,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    // Suppress stdlib unions (MaybeUninit, ManuallyDrop, RawWaker vtable, etc.).
+    let krate = tcx.crate_name(union_adt.did().krate);
+    if matches!(krate.as_str(), "core" | "alloc" | "std") {
+        return None;
+    }
+    // Projection must resolve to a single field via last_simple_field_idx:
+    // [Field(idx)] or [Deref, Field(idx)]. Nested projections are rejected there.
+    let field_idx = last_simple_field_idx(place.projection.as_ref())?;
+    Some((place.local, field_idx))
 }
 
 /// Extract the **base** Local from the first call argument, accepting projections.
