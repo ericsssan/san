@@ -88,7 +88,9 @@ impl Checker for TriompheUnchecked {
                     "every element of the MaybeUninit<[T]> slice must be initialized before this \
                      call; partial initialization followed by assume_init_slice is UB",
                 )
-            } else if path.ends_with("::assume_init") {
+            } else if path.ends_with("::assume_init")
+                && (path.contains("UniqueArc") || path.contains("triomphe"))
+            {
                 (
                     "UniqueArc::assume_init",
                     "all bytes of the MaybeUninit<T> must be written before calling assume_init; \

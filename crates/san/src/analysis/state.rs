@@ -239,6 +239,23 @@ pub struct BlockState {
     /// Join = UNION: if the field held a tracked pointer on ANY path, we may see it.
     pub field_owned: HashMap<(Local, u32), BTreeSet<ObjectId>>,
 
+    // ── MaybeUninit sub-field initialization domain ────────────────────────
+    /// ptr_local → mu_local: raw `*mut T` pointer obtained from
+    /// `MaybeUninit::<T>::as_mut_ptr()`. Used to connect projected field
+    /// writes `(*ptr).field_i = val` back to the originating MaybeUninit
+    /// local so that field-wise initialization can be tracked.
+    /// Join = INTERSECTION with agreement: keep only if ALL paths agree on
+    /// which MaybeUninit local a given pointer came from.
+    pub mu_raw_ptr: HashMap<Local, Local>,
+
+    /// mu_local → set of field indices (of the inner type T) that have been
+    /// written via `(*mu_raw_ptr[ptr]).field_i = val`. When the set covers
+    /// ALL fields of T (for struct types), `init[mu_local]` is upgraded to
+    /// `Initialized`, suppressing `assume_init` findings.
+    /// Join = INTERSECTION of field sets: a field counts only if written on
+    /// ALL incoming paths.
+    pub mu_field_inits: HashMap<Local, HashSet<u32>>,
+
     // ── union variant tracking domain ──────────────────────────────────────
     /// union-local (or ptr-to-union-local) → field index most recently written.
     /// Only set for user-defined unions (stdlib unions like `MaybeUninit` are excluded).
@@ -608,6 +625,34 @@ impl BlockState {
             }
         }
 
+        // mu_raw_ptr: INTERSECTION with agreement — drop pointer if paths disagree on target.
+        let new_mrp: HashMap<Local, Local> = result.mu_raw_ptr
+            .iter()
+            .filter_map(|(&l, &t)| {
+                if other.mu_raw_ptr.get(&l) == Some(&t) { Some((l, t)) } else { None }
+            })
+            .collect();
+        if new_mrp != result.mu_raw_ptr {
+            changed = true;
+            result.mu_raw_ptr = new_mrp;
+        }
+
+        // mu_field_inits: INTERSECTION of field sets — a field counts only if written on ALL paths.
+        let new_mfi: HashMap<Local, HashSet<u32>> = result.mu_field_inits
+            .iter()
+            .filter_map(|(&l, fields)| {
+                other.mu_field_inits.get(&l).map(|other_fields| {
+                    let intersected: HashSet<u32> =
+                        fields.iter().copied().filter(|f| other_fields.contains(f)).collect();
+                    (l, intersected)
+                })
+            })
+            .collect();
+        if new_mfi != result.mu_field_inits {
+            changed = true;
+            result.mu_field_inits = new_mfi;
+        }
+
         // active_variant: INTERSECTION with agreement.
         // Keep an entry only if all predecessor paths agree on which field is active.
         let new_av: HashMap<Local, u32> = result.active_variant
@@ -899,6 +944,13 @@ impl BlockState {
     /// transfer pattern; the corresponding `from_raw_fd` is safe.
     pub fn fd_was_transferred(&self, local: Local) -> bool {
         self.fd_origin.contains(&local)
+    }
+
+    /// Returns `true` when `local` is a `MaybeUninit<T>` that is provably fully
+    /// initialized on all reaching paths — set by `MaybeUninit::new`, `zeroed`,
+    /// `write`, or by completing all struct-field writes via `as_mut_ptr`.
+    pub fn local_is_maybeuninit_initialized(&self, local: Local) -> bool {
+        matches!(self.init.get(&local), Some(InitState::Initialized))
     }
 
     /// Returns `true` if `local` holds a raw fd integer that was already

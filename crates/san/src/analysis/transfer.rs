@@ -77,6 +77,27 @@ pub fn apply_statement<'tcx>(
         if let Some((union_local, field_idx)) = direct_union_field_access(*dst, body, tcx) {
             state.active_variant.insert(union_local, field_idx);
         }
+        // MaybeUninit sub-field tracking: (*mu_ptr).field_i = val where mu_ptr ∈ mu_raw_ptr.
+        // When every field of the inner struct type has been written, upgrade init to Initialized.
+        if let Some(field_i) = last_simple_field_idx(dst.projection.as_ref()) {
+            if let Some(&mu_local) = state.mu_raw_ptr.get(&dst.local) {
+                let ptr_ty = body.local_decls[dst.local].ty;
+                if let TyKind::RawPtr(pointee_ty, _) = ptr_ty.kind() {
+                    if let TyKind::Adt(adt_def, _) = pointee_ty.kind() {
+                        if adt_def.is_struct() {
+                            let n_fields = adt_def.non_enum_variant().fields.len();
+                            if n_fields > 0 {
+                                let written = state.mu_field_inits.entry(mu_local).or_default();
+                                written.insert(field_i);
+                                if written.len() >= n_fields {
+                                    state.init.insert(mu_local, InitState::Initialized);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -127,6 +148,8 @@ pub fn apply_statement<'tcx>(
     state.mul_overflow.remove(&dst_local);
     state.layout_overflow.remove(&dst_local);
     state.active_variant.remove(&dst_local);
+    state.mu_raw_ptr.remove(&dst_local);
+    state.mu_field_inits.remove(&dst_local);
     // When the struct base local is reassigned, any field-ownership we tracked for
     // it is now stale (a different value lives in that local).
     state.clear_field_owned_for(dst_local);
@@ -179,6 +202,20 @@ pub fn apply_statement<'tcx>(
                 if is_move { state.active_variant.remove(&src.local); }
             } else {
                 state.active_variant.remove(&dst_local);
+            }
+            // Propagate mu_raw_ptr: if src is a MaybeUninit raw ptr, dst inherits the target.
+            if let Some(&mu_local) = state.mu_raw_ptr.get(&src.local) {
+                state.mu_raw_ptr.insert(dst_local, mu_local);
+                if is_move { state.mu_raw_ptr.remove(&src.local); }
+            } else {
+                state.mu_raw_ptr.remove(&dst_local);
+            }
+            // Propagate mu_field_inits: the MaybeUninit local itself moves.
+            if let Some(fields) = state.mu_field_inits.get(&src.local).cloned() {
+                state.mu_field_inits.insert(dst_local, fields);
+                if is_move { state.mu_field_inits.remove(&src.local); }
+            } else {
+                state.mu_field_inits.remove(&dst_local);
             }
             // Propagate cast_origin: if src was itself a cast, dst inherits that origin.
             if let Some(&orig) = state.cast_origin.get(&src.local) {
@@ -1492,9 +1529,8 @@ pub fn apply_terminator<'tcx>(
                 state.bounded.remove(&dest);
                 state.bounded_or_eq.remove(&dest);
             } else if is_maybe_uninit_init(&path) {
-                // MaybeUninit::new(val): wraps `val` in a MaybeUninit — propagate points_to
-                // so ownership of raw pointers inside tracks through the wrapper.
-                // Also marks the destination as initialized.
+                // MaybeUninit::new(val) / zeroed(): dest IS the new MaybeUninit<T>.
+                // Propagate points_to from the wrapped value so ownership tracks through.
                 if let Some(src) = first_arg_local(args) {
                     if let Some(objs) = state.points_to.get(&src).cloned() {
                         if !objs.is_empty() {
@@ -1509,6 +1545,40 @@ pub fn apply_terminator<'tcx>(
                     state.points_to.remove(&dest);
                 }
                 state.init.insert(dest, InitState::Initialized);
+                state.buf_written.remove(&dest);
+                state.local_proto.remove(&dest);
+                state.lt_facts.remove(&dest);
+                state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
+                state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
+            } else if is_maybe_uninit_write(&path) {
+                // MaybeUninit::write(&mut self, val) -> &mut T: mutates self in place.
+                // The RETURN (dest) is &mut T, not MaybeUninit — set init on the
+                // underlying MaybeUninit local via ref_base[self_ref] → mu_local.
+                if let Some(self_ref) = first_arg_local(args) {
+                    let mu_local = state.ref_base.get(&self_ref).copied().unwrap_or(self_ref);
+                    state.init.insert(mu_local, InitState::Initialized);
+                }
+                state.init.remove(&dest);
+                state.buf_written.remove(&dest);
+                state.local_proto.remove(&dest);
+                state.lt_facts.remove(&dest);
+                state.ge_facts.remove(&dest);
+                state.le_facts.remove(&dest);
+                state.gt_facts.remove(&dest);
+                state.bounded.remove(&dest);
+                state.bounded_or_eq.remove(&dest);
+            } else if is_maybe_uninit_as_mut_ptr(&path) {
+                // MaybeUninit::as_mut_ptr(&mut self) -> *mut T: record the mapping
+                // ptr → mu_local so projected writes (*ptr).field_i = val can be
+                // attributed back to the MaybeUninit for field-completeness tracking.
+                if let Some(self_ref) = first_arg_local(args) {
+                    let mu_local = state.ref_base.get(&self_ref).copied().unwrap_or(self_ref);
+                    state.mu_raw_ptr.insert(dest, mu_local);
+                }
+                state.init.remove(&dest);
                 state.buf_written.remove(&dest);
                 state.local_proto.remove(&dest);
                 state.lt_facts.remove(&dest);
@@ -2441,9 +2511,25 @@ pub fn is_shared_deref(path: &str) -> bool {
 
 /// Returns `true` for `MaybeUninit` constructors that produce a provably initialized value:
 /// `MaybeUninit::new(val)`, `MaybeUninit::zeroed()`, and `MaybeUninit::write(val)`.
+/// Returns `true` for `MaybeUninit` constructors whose RETURN VALUE is the initialized
+/// MaybeUninit: `new(val)` and `zeroed()`. Does NOT include `write(&mut self, val)`
+/// because that returns `&mut T`, not `MaybeUninit<T>` — the write() case is handled
+/// separately via `ref_base` to mark the underlying MaybeUninit local as initialized.
 pub fn is_maybe_uninit_init(path: &str) -> bool {
     path.contains("MaybeUninit")
-        && (path.ends_with("::new") || path.ends_with("::zeroed") || path.ends_with("::write"))
+        && (path.ends_with("::new") || path.ends_with("::zeroed"))
+}
+
+/// Returns `true` for `MaybeUninit::write(&mut self, val) -> &mut T` — mutates self
+/// in place. The init fact must be applied to the receiver (via ref_base), not dest.
+pub fn is_maybe_uninit_write(path: &str) -> bool {
+    path.contains("MaybeUninit") && path.ends_with("::write")
+}
+
+/// Returns `true` for `MaybeUninit::as_mut_ptr(&mut self) -> *mut T` — the returned
+/// pointer points into the MaybeUninit's value slot.
+pub fn is_maybe_uninit_as_mut_ptr(path: &str) -> bool {
+    path.contains("MaybeUninit") && path.ends_with("::as_mut_ptr")
 }
 
 /// Returns `true` for `BufMut` write methods that guarantee bytes are written before advancing.

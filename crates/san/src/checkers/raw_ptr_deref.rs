@@ -151,6 +151,12 @@ impl<'a, 'tcx> Visitor<'tcx> for DerefVisitor<'a, 'tcx> {
                     if state.ptr_is_raw_owned(base.local) {
                         continue;
                     }
+                    // Suppress writes through a MaybeUninit::as_mut_ptr() pointer:
+                    // the pointer is always valid (points to a live stack allocation)
+                    // and writes are the initialization phase — not a safety hazard.
+                    if context.is_mutating_use() && state.mu_raw_ptr.contains_key(&base.local) {
+                        continue;
+                    }
                 }
             }
 

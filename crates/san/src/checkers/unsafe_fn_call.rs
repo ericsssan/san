@@ -108,6 +108,18 @@ impl Checker for UnsafeFnCall {
                 }
                 if uaf_found { continue; }
                 if any_bounded { continue; }
+                // assume_init on a proven-initialized MaybeUninit: the specific
+                // checker already suppressed; don't re-flag as unsafe_fn_call.
+                if crate::analysis::transfer::is_maybe_uninit_assume_init(&path) {
+                    let recv_init = args.first()
+                        .and_then(|a| match &a.node {
+                            Operand::Move(p) | Operand::Copy(p)
+                                if p.projection.is_empty() => Some(p.local),
+                            _ => None,
+                        })
+                        .map_or(false, |l| state.local_is_maybeuninit_initialized(l));
+                    if recv_init { continue; }
+                }
                 // Pairwise disequality: for two-key APIs like `get2_unchecked_mut`
                 // or `get_disjoint_unchecked_mut([k1, k2])`, suppress if any two
                 // locals (direct args OR components of array args) are proven ≠.

@@ -60,6 +60,7 @@ declare -A EXPECTED=(
     [str_mutation]="str_mutation"
     [thread_spawn_unchecked]="thread_spawn_unchecked"
     [unchecked_int_arith]="unchecked_int_arith"
+    [maybeuninit_field_init]=""
     [union_field]="union_wrong_field"
     [union_wrong_variant]="union_wrong_field"
     [unsafecell_get]="unsafecell_get"
