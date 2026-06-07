@@ -26,6 +26,7 @@
 ///     overflow on rounding-up is impossible and the finding is suppressed.
 ///   • If the `align` argument is a constant power of two, the power-of-two
 ///     requirement is met (the overflow condition still applies).
+use crate::analysis::transfer::const_u64;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -59,20 +60,35 @@ impl Checker for LayoutUnchecked {
                 {
                     // Flow suppression: if size (arg[0]) has proven const_upper ≤
                     // SAFE_LAYOUT_SIZE, overflow on rounding is impossible — suppress.
-                    if let Some(size_local) = args.first().and_then(|a| match &a.node {
-                        Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
-                            Some(p.local)
-                        }
-                        _ => None,
-                    }) {
-                        if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
-                            if let Some(&upper) = state.const_upper.get(&size_local) {
-                                if upper <= SAFE_LAYOUT_SIZE {
-                                    continue; // size is provably small enough
-                                }
+                    let size_arg = args.first();
+                let align_arg = args.get(1);
+                let size_local = size_arg.and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+                    _ => None,
+                });
+                if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
+                    // Check if align is a constant power-of-two (alignment concern met).
+                    let align_is_pow2 = align_arg.map_or(false, |a| {
+                        const_u64(&a.node).map_or(false, |v| v.is_power_of_two())
+                    });
+                    if let Some(size_local) = size_local {
+                        // If size is provably small enough, both concerns are met.
+                        if let Some(&upper) = state.const_upper.get(&size_local) {
+                            if upper <= SAFE_LAYOUT_SIZE {
+                                continue;
                             }
                         }
+                        // If align is a proven power-of-two and the overflow concern
+                        // is handled by alloc_size_overflow (mul_overflow[size]),
+                        // suppress layout_unchecked to avoid duplicate findings.
+                        if align_is_pow2 && state.mul_overflow.contains(&size_local) {
+                            continue;
+                        }
+                    } else if align_is_pow2 {
+                        // Constant size (no local) + power-of-two align: no overflow risk.
+                        continue;
                     }
+                }
                     let note = if path.ends_with("Layout::from_size_alignment_unchecked") {
                         "size must not overflow isize::MAX when rounded to the given Alignment; \
                          the `Alignment` type guarantees power-of-two but size overflow is still \

@@ -8,6 +8,7 @@
 /// Violations cause OOB writes, uninitialized reads, and double drops.
 /// Seen in: RUSTSEC-2020-0034 (arr), RUSTSEC-2021-0040 (arenavec), and
 /// dozens of custom Vec implementations across the ecosystem.
+use crate::analysis::transfer::const_u64;
 use crate::{Checker, Finding, Severity};
 use rustc_middle::mir::{Body, Operand, TerminatorKind};
 use rustc_middle::ty::TyCtxt;
@@ -35,6 +36,10 @@ impl Checker for VecSetLen {
             // old_len..new_len remains the caller's, but a provably in-capacity
             // length is the common safe idiom — e.g. `set_len` immediately after
             // `reserve`/`with_capacity` followed by a checked fill.)
+            // set_len(0) is always safe — truncating to zero can never exceed capacity.
+            if args.get(1).map_or(false, |a| const_u64(&a.node) == Some(0)) {
+                continue;
+            }
             if let Some(state) = flow.state_before_terminator(tcx, body, bb) {
                 if let Some(len_local) = args.get(1).and_then(|a| match &a.node {
                     Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => Some(p.local),

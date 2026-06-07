@@ -41,32 +41,63 @@ impl Checker for AllocSizeOverflow {
             let Some((def_id, _)) = func.const_fn_def() else { continue };
 
             let path = tcx.def_path_str(def_id);
-            if !path.ends_with("Layout::from_size_align_unchecked")
-                && !path.ends_with("Layout::from_size_alignment_unchecked")
-            {
-                continue;
-            }
-
-            // The first argument is the `size` parameter.
-            let size_local = match args.first().map(|a| &a.node) {
-                Some(Operand::Move(p) | Operand::Copy(p)) if p.projection.is_empty() => p.local,
-                _ => continue,
-            };
-
             let Some(state) = flow.state_before_terminator(tcx, body, bb) else { continue };
 
-            if state.mul_overflow.contains(&size_local) {
-                findings.push(Finding {
-                    rule_id: "alloc_size_overflow",
-                    severity: Severity::Warning,
-                    span: terminator.source_info.span,
-                    message: "`Layout::from_size_align_unchecked` — size argument came from \
-                              arithmetic (mul/add) that can exceed isize::MAX without overflow \
-                              check; wrapping produces a too-small allocation and heap overflow \
-                              on subsequent writes; use `Layout::array::<T>(n)` or \
-                              `n.checked_mul(size_of::<T>())` to handle overflow safely"
-                        .to_string(),
-                });
+            if path.ends_with("Layout::from_size_align_unchecked")
+                || path.ends_with("Layout::from_size_alignment_unchecked")
+            {
+                // The first argument is the `size` parameter.
+                let size_local = match args.first().map(|a| &a.node) {
+                    Some(Operand::Move(p) | Operand::Copy(p)) if p.projection.is_empty() => p.local,
+                    _ => continue,
+                };
+                if state.mul_overflow.contains(&size_local) {
+                    findings.push(Finding {
+                        rule_id: "alloc_size_overflow",
+                        severity: Severity::Warning,
+                        span: terminator.source_info.span,
+                        message: "`Layout::from_size_align_unchecked` — size argument came from \
+                                  arithmetic (mul/add) that can exceed isize::MAX without overflow \
+                                  check; wrapping produces a too-small allocation and heap overflow \
+                                  on subsequent writes; use `Layout::array::<T>(n)` or \
+                                  `n.checked_mul(size_of::<T>())` to handle overflow safely"
+                            .to_string(),
+                    });
+                }
+            } else if path.ends_with("GlobalAlloc::alloc")
+                || path.ends_with("GlobalAlloc::alloc_zeroed")
+                || path.ends_with("GlobalAlloc::realloc")
+                || path.ends_with("alloc::alloc")
+                || path.ends_with("alloc::alloc_zeroed")
+                || path.ends_with("alloc::realloc")
+                || path.ends_with("Allocator::allocate")
+                || path.ends_with("Allocator::allocate_zeroed")
+                || path.ends_with("Allocator::grow")
+                || path.ends_with("Allocator::grow_zeroed")
+                || path.ends_with("Allocator::shrink")
+            {
+                // alloc(layout) / realloc(ptr, layout, new_size): the layout arg
+                // is the first arg (alloc) or second (realloc). Check first arg only;
+                // realloc's new_size is a usize separate from the layout.
+                let layout_local = match args.first().map(|a| &a.node) {
+                    Some(Operand::Move(p) | Operand::Copy(p)) if p.projection.is_empty() => p.local,
+                    _ => continue,
+                };
+                if state.layout_overflow.contains(&layout_local) {
+                    findings.push(Finding {
+                        rule_id: "alloc_size_overflow",
+                        severity: Severity::Warning,
+                        span: terminator.source_info.span,
+                        message: format!(
+                            "`{}` — layout passed to allocator has a size computed from \
+                             arithmetic that can exceed isize::MAX without overflow check; \
+                             the allocator will receive a too-small size and subsequent \
+                             writes overflow the allocation; use `Layout::array::<T>(n)` \
+                             or `n.checked_mul(size_of::<T>())` at the layout construction site",
+                            path.rsplit("::").next().unwrap_or("alloc")
+                        ),
+                    });
+                }
             }
         }
 

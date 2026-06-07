@@ -221,6 +221,15 @@ pub struct BlockState {
     /// Join = UNION (potential overflow on any path → flag all paths).
     pub mul_overflow: HashSet<Local>,
 
+    // ── layout-overflow tracking domain ────────────────────────────────────
+    /// Locals holding a `Layout` value that was produced by
+    /// `Layout::from_size_align_unchecked(size, _)` where `size ∈ mul_overflow`.
+    /// When this layout is passed to `alloc()`/`alloc_zeroed()`/`realloc()`,
+    /// the allocator receives a potentially too-small size (overflow wrap).
+    /// Propagated through moves/copies of the layout local.
+    /// Join = UNION.
+    pub layout_overflow: HashSet<Local>,
+
     // ── struct-field ownership domain ──────────────────────────────────────
     /// (base_local, field_idx) → set of raw-owned objects stored into that field.
     /// Populated when `(*base).field_N = move tracked_ptr` and the source has
@@ -566,6 +575,13 @@ impl BlockState {
         // mul_overflow: UNION — flag overflow if possible on any path.
         for &l in &other.mul_overflow {
             if result.mul_overflow.insert(l) {
+                changed = true;
+            }
+        }
+
+        // layout_overflow: UNION.
+        for &l in &other.layout_overflow {
+            if result.layout_overflow.insert(l) {
                 changed = true;
             }
         }

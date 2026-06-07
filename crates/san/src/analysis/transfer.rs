@@ -120,6 +120,7 @@ pub fn apply_statement<'tcx>(
     state.index_bounded_or_eq_for.retain(|&(i, c)| i != dst_local && c != dst_local);
     state.const_ptr_cast.remove(&dst_local);
     state.mul_overflow.remove(&dst_local);
+    state.layout_overflow.remove(&dst_local);
     // When the struct base local is reassigned, any field-ownership we tracked for
     // it is now stale (a different value lives in that local).
     state.clear_field_owned_for(dst_local);
@@ -165,6 +166,7 @@ pub fn apply_statement<'tcx>(
             propagate_set!(fd_origin);
             propagate_set!(fd_consumed);
             propagate_set!(mul_overflow);
+            propagate_set!(layout_overflow);
             // Propagate cast_origin: if src was itself a cast, dst inherits that origin.
             if let Some(&orig) = state.cast_origin.get(&src.local) {
                 state.cast_origin.insert(dst_local, orig);
@@ -1633,6 +1635,27 @@ pub fn apply_terminator<'tcx>(
                 || path.ends_with("::as_non_null")
             {
                 state.nonzero.insert(dest);
+            }
+            // NonNull::dangling() creates a well-typed non-null sentinel pointer
+            // (value = align_of::<T>()). It is provably non-null and commonly used
+            // as the empty-collection sentinel (e.g. Vec's zero-capacity internal ptr).
+            // Suppress nonnull_new_unchecked for locals derived from dangling().
+            if path.ends_with("::dangling") {
+                state.nonzero.insert(dest);
+            }
+            // Layout::from_size_align_unchecked(size, _) where size ∈ mul_overflow:
+            // mark the resulting Layout as layout_overflow so that alloc(layout)
+            // call sites can also fire alloc_size_overflow.
+            if (path.ends_with("Layout::from_size_align_unchecked")
+                || path.ends_with("Layout::from_size_alignment_unchecked"))
+                && args.first().and_then(|a| match &a.node {
+                    Operand::Move(p) | Operand::Copy(p) if p.projection.is_empty() => {
+                        Some(state.mul_overflow.contains(&p.local))
+                    }
+                    _ => None,
+                }).unwrap_or(false)
+            {
+                state.layout_overflow.insert(dest);
             }
         }
 
